@@ -94,7 +94,7 @@ The project has a complete implementation for generating 3D printable files from
 - **3D Formats**: STL (monochrome) and 3MF (with color materials)
 - **Export Formats**: PNG (raster), SVG (vector)
 - **Visual Features**: Custom colors, text labels, center text/emoji (with bundled fonts), image overlays, decorative frames, artistic patterns
-- **3D Features**: Multi-layer heights, mounting options (keychain loops), inverted mode
+- **3D Features**: Multi-layer heights, mounting options (rounded keychain tabs), inverted mode, recessed back text (STL only)
 - **UI Features**: Auto-open generated files, terminal QR display, rich progress output
 - **Advanced**: Frame detection using connected component analysis, shared geometry generation for consistency
 

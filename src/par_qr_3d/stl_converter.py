@@ -26,11 +26,12 @@ The different approaches are necessary because:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from stl import mesh  # type: ignore[import-untyped]
 
 try:
@@ -45,6 +46,7 @@ from .logging_config import get_logger
 from .utils import (
     color_to_3mf_format,
     ensure_grayscale,
+    load_font_with_fallbacks,
     numpy_mesh_to_trimesh,
     parse_color,
     prepare_output_path,
@@ -54,6 +56,85 @@ from .utils import (
 )
 
 logger = get_logger(__name__)
+
+# Keychain tab outline resolution: evenly spaced samples plus the two square corners
+KEYCHAIN_SEGMENTS = 32
+# Top, bottom, outer wall and hole wall each use 2 triangles per outline point
+KEYCHAIN_TRIANGLE_COUNT = 8 * (KEYCHAIN_SEGMENTS + 2)
+
+# Minimum clearance between back text and the edge of the base
+BACK_TEXT_MARGIN_MM = 1.5
+
+
+def render_back_text_mask(
+    text: str,
+    grid_shape: tuple[int, int],
+    pixel_size: float,
+    text_size_mm: float = 4.0,
+) -> np.ndarray:
+    """Render text as a mask for recessing into the bottom face of the model.
+
+    The text is centered on the base and mirrored so it reads correctly when the
+    model is flipped over. If it does not fit at the requested size it is shrunk.
+
+    Args:
+        text: Text to render. Lines are separated by newlines or a literal "\\n".
+        grid_shape: (rows, cols) of the height map the mask must match
+        pixel_size: Size of each height map pixel in mm
+        text_size_mm: Target height of capital letters in mm
+
+    Returns:
+        Boolean array with the height map's shape, True where text is recessed
+
+    Raises:
+        ValueError: If the text is empty or cannot fit on the base
+    """
+    lines = [line.strip() for line in text.replace("\\n", "\n").split("\n") if line.strip()]
+    if not lines:
+        raise ValueError("Back text is empty")
+    joined = "\n".join(lines)
+
+    rows, cols = grid_shape
+    margin_px = max(1, math.ceil(BACK_TEXT_MARGIN_MM / pixel_size))
+    max_width = cols - 2 * margin_px
+    max_height = rows - 2 * margin_px
+
+    # Measure how tall capital letters are relative to the font size
+    draw_dummy = ImageDraw.Draw(Image.new("L", (1, 1)))
+    ref_font = load_font_with_fallbacks(font_size=100, use_bold=True, text=joined)
+    ref_bbox = draw_dummy.textbbox((0, 0), "H", font=ref_font)
+    cap_ratio = (ref_bbox[3] - ref_bbox[1]) / 100
+
+    requested_size = max(1, round(text_size_mm / pixel_size / cap_ratio))
+    font_size = requested_size
+    while True:
+        font = load_font_with_fallbacks(font_size=font_size, use_bold=True, text=joined)
+        spacing = max(1, round(font_size * 0.25))
+        bbox = draw_dummy.multiline_textbbox((0, 0), joined, font=font, spacing=spacing, align="center")
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        if text_width <= max_width and text_height <= max_height:
+            break
+        if font_size <= 4:
+            raise ValueError(f"Back text '{joined}' does not fit on the base. Use shorter text or a larger base.")
+        font_size = max(4, int(font_size * 0.9))
+
+    if font_size < requested_size:
+        logger.warning(
+            f"Back text shrunk to fit: letters are {font_size * cap_ratio * pixel_size:.1f}mm tall "
+            f"instead of {text_size_mm:.1f}mm"
+        )
+
+    text_image = Image.new("L", (cols, rows), 255)
+    draw = ImageDraw.Draw(text_image)
+    text_x = (cols - text_width) / 2 - bbox[0]
+    text_y = (rows - text_height) / 2 - bbox[1]
+    draw.multiline_text((text_x, text_y), joined, fill=0, font=font, spacing=spacing, align="center")
+
+    # Binarize like front labels, then match the height map's vertical flip and
+    # mirror horizontally so the text reads correctly from underneath
+    mask = np.array(text_image) <= 128
+    return np.fliplr(np.flipud(mask))
 
 
 def image_to_3d_array(
@@ -222,6 +303,7 @@ def create_stl_from_heightmap(
     hole_diameter: float = 4.0,
     validate_and_repair: bool = True,
     debug_path: Path | str | None = None,
+    bottom_map: np.ndarray | None = None,
 ) -> Any:
     """Create an STL mesh from a height map.
 
@@ -232,6 +314,9 @@ def create_stl_from_heightmap(
         hole_diameter: Diameter of mounting holes in mm
         validate_and_repair: If True, validate and repair the mesh
         debug_path: If provided, save debug visualization to this path
+        bottom_map: Optional 2D array of bottom face heights, same shape as height_map.
+            Values above 0 are recessed into the bottom (used for back text). The outer
+            border must stay at 0.
 
     Returns:
         STL Mesh object with optional mounting features
@@ -242,8 +327,14 @@ def create_stl_from_heightmap(
     # Top surface: 2 triangles per pixel
     num_faces = height * width * 2
 
-    # Bottom surface: 2 triangles for entire base
-    num_faces += 2
+    if bottom_map is None:
+        # Bottom surface: 2 triangles for entire base
+        num_faces += 2
+    else:
+        # Bottom surface: 2 triangles per pixel plus walls at each recess edge
+        num_faces += height * width * 2
+        num_faces += 2 * int(np.count_nonzero(bottom_map[:, 1:] != bottom_map[:, :-1]))
+        num_faces += 2 * int(np.count_nonzero(bottom_map[1:, :] != bottom_map[:-1, :]))
 
     # Outer walls: 2 triangles per edge pixel
     num_faces += 2 * (2 * height + 2 * width)
@@ -262,8 +353,7 @@ def create_stl_from_heightmap(
 
     # Add faces for mounting features
     if mount_type == "keychain":
-        # The keychain mount has 48 triangles
-        num_faces += 48
+        num_faces += KEYCHAIN_TRIANGLE_COUNT
 
     # Create mesh
     stl_mesh: Any = mesh.Mesh(np.zeros(num_faces, dtype=mesh.Mesh.dtype))
@@ -393,11 +483,16 @@ def create_stl_from_heightmap(
         stl_mesh.vectors[face_idx] = np.array([[total_width, y1, 0], [total_width, y1, h], [total_width, y0, h]])
         face_idx += 1
 
-    # Bottom face - solid base covering entire area
-    stl_mesh.vectors[face_idx] = np.array([[0, 0, 0], [total_width, 0, 0], [0, total_height, 0]])
-    face_idx += 1
-    stl_mesh.vectors[face_idx] = np.array([[total_width, 0, 0], [total_width, total_height, 0], [0, total_height, 0]])
-    face_idx += 1
+    if bottom_map is None:
+        # Bottom face - solid base covering entire area
+        stl_mesh.vectors[face_idx] = np.array([[0, 0, 0], [total_width, 0, 0], [0, total_height, 0]])
+        face_idx += 1
+        stl_mesh.vectors[face_idx] = np.array(
+            [[total_width, 0, 0], [total_width, total_height, 0], [0, total_height, 0]]
+        )
+        face_idx += 1
+    else:
+        face_idx = add_recessed_bottom(stl_mesh, face_idx, bottom_map, pixel_size)
 
     # Add mounting features if requested
     if mount_type == "keychain":
@@ -461,6 +556,59 @@ def create_stl_from_heightmap(
             save_mesh_debug_view(trimesh_obj, debug_path)
 
     return stl_mesh
+
+
+def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pixel_size: float) -> int:
+    """Add a bottom surface with recesses (such as back text) to an STL mesh.
+
+    Args:
+        stl_mesh: The STL mesh object to add faces to
+        face_idx: Current face index to start adding faces
+        bottom_map: 2D array of bottom face heights; 0 is flush with the print bed
+        pixel_size: Size of each pixel in mm
+
+    Returns:
+        Updated face index after adding bottom faces
+    """
+    height, width = bottom_map.shape
+
+    for y in range(height):
+        for x in range(width):
+            x0, y0 = x * pixel_size, y * pixel_size
+            x1, y1 = (x + 1) * pixel_size, (y + 1) * pixel_size
+            b = bottom_map[y, x]
+
+            # Floor of this pixel, facing down
+            stl_mesh.vectors[face_idx] = np.array([[x0, y0, b], [x0, y1, b], [x1, y0, b]])
+            face_idx += 1
+            stl_mesh.vectors[face_idx] = np.array([[x1, y0, b], [x0, y1, b], [x1, y1, b]])
+            face_idx += 1
+
+            # Wall to the right neighbor, facing into whichever side is recessed deeper
+            if x < width - 1 and bottom_map[y, x + 1] != b:
+                right_b = bottom_map[y, x + 1]
+                lo, hi = min(b, right_b), max(b, right_b)
+                if b > right_b:
+                    stl_mesh.vectors[face_idx] = np.array([[x1, y0, lo], [x1, y0, hi], [x1, y1, lo]])
+                    stl_mesh.vectors[face_idx + 1] = np.array([[x1, y0, hi], [x1, y1, hi], [x1, y1, lo]])
+                else:
+                    stl_mesh.vectors[face_idx] = np.array([[x1, y0, lo], [x1, y1, lo], [x1, y0, hi]])
+                    stl_mesh.vectors[face_idx + 1] = np.array([[x1, y1, lo], [x1, y1, hi], [x1, y0, hi]])
+                face_idx += 2
+
+            # Wall to the next row, facing into whichever side is recessed deeper
+            if y < height - 1 and bottom_map[y + 1, x] != b:
+                next_b = bottom_map[y + 1, x]
+                lo, hi = min(b, next_b), max(b, next_b)
+                if b > next_b:
+                    stl_mesh.vectors[face_idx] = np.array([[x0, y1, lo], [x1, y1, lo], [x0, y1, hi]])
+                    stl_mesh.vectors[face_idx + 1] = np.array([[x1, y1, lo], [x1, y1, hi], [x0, y1, hi]])
+                else:
+                    stl_mesh.vectors[face_idx] = np.array([[x0, y1, lo], [x0, y1, hi], [x1, y1, lo]])
+                    stl_mesh.vectors[face_idx + 1] = np.array([[x0, y1, hi], [x1, y1, hi], [x1, y1, lo]])
+                face_idx += 2
+
+    return face_idx
 
 
 def generate_box_geometry(
@@ -811,123 +959,75 @@ def generate_keychain_mount_geometry(
         - vertices is a list of [x, y, z] coordinates
         - triangles is a list of (v0, v1, v2) vertex indices
     """
-    # Position tab at the top center of the QR code
-    tab_x_start = (base_width - tab_width) / 2
-    tab_x_end = tab_x_start + tab_width
+    # The tab is a "D" shape: straight sides rising from the QR base edge, closed
+    # by a semicircle concentric with the hole so the ring around it is even.
     tab_y_start = base_depth  # Tab starts at the base edge
-    tab_y_end = base_depth + tab_height  # Tab extends beyond the base
-    # Use the provided tab thickness instead of base height
-
-    # Hole center
-    hole_center_x = base_width / 2
-    hole_center_y = tab_y_start + tab_height / 2
     hole_radius = hole_diameter / 2
+    arc_radius = max(tab_width / 2, hole_radius + 1.0)
+    hole_center_x = base_width / 2
+    # Place the arc top at the tab height, but keep at least 1mm between hole and base edge
+    hole_center_y = max(tab_y_start + tab_height - arc_radius, tab_y_start + hole_radius + 1.0)
 
-    vertices = []
-    triangles = []
+    # Sample angles around the hole center, offset by half a step so the sampled
+    # angles never coincide with the two square corners added below
+    angles = [2 * np.pi * (i + 0.5) / KEYCHAIN_SEGMENTS for i in range(KEYCHAIN_SEGMENTS)]
+    corner_dy = tab_y_start - hole_center_y
+    angles.append(float(np.arctan2(corner_dy, -arc_radius)) % (2 * np.pi))
+    angles.append(float(np.arctan2(corner_dy, arc_radius)) % (2 * np.pi))
+    angles.sort()
 
-    # Add tab corner vertices (8 vertices for the tab box)
-    # Bottom face corners
-    vertices.append([tab_x_start, tab_y_start, 0])  # 0: bottom-left-bottom
-    vertices.append([tab_x_end, tab_y_start, 0])  # 1: bottom-right-bottom
-    vertices.append([tab_x_end, tab_y_end, 0])  # 2: top-right-bottom
-    vertices.append([tab_x_start, tab_y_end, 0])  # 3: top-left-bottom
-    # Top face corners
-    vertices.append([tab_x_start, tab_y_start, tab_thickness])  # 4: bottom-left-top
-    vertices.append([tab_x_end, tab_y_start, tab_thickness])  # 5: bottom-right-top
-    vertices.append([tab_x_end, tab_y_end, tab_thickness])  # 6: top-right-top
-    vertices.append([tab_x_start, tab_y_end, tab_thickness])  # 7: top-left-top
+    # Outer outline point for each angle: arc on the upper half, rectangle below
+    outer_points = []
+    for angle in angles:
+        cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+        if sin_a >= 0:
+            dist = arc_radius
+        else:
+            dist = corner_dy / sin_a  # Distance to the base edge
+            if abs(cos_a) > 1e-9:
+                dist = min(dist, arc_radius / abs(cos_a))  # Distance to a straight side
+        outer_points.append((hole_center_x + dist * cos_a, hole_center_y + dist * sin_a))
 
-    # Create octagon vertices for the hole
-    num_sides = 8
-    hole_vertices_top_start = len(vertices)
-    hole_vertices_bottom_start = hole_vertices_top_start + num_sides
+    hole_points = [
+        (hole_center_x + hole_radius * float(np.cos(a)), hole_center_y + hole_radius * float(np.sin(a))) for a in angles
+    ]
 
-    for i in range(num_sides):
-        angle = 2 * np.pi * i / num_sides
-        x = hole_center_x + hole_radius * np.cos(angle)
-        y = hole_center_y + hole_radius * np.sin(angle)
-        vertices.append([x, y, tab_thickness])  # Top hole vertices
+    num_points = len(angles)
+    vertices: list[list[float]] = []
+    triangles: list[tuple[int, int, int]] = []
 
-    for i in range(num_sides):
-        angle = 2 * np.pi * i / num_sides
-        x = hole_center_x + hole_radius * np.cos(angle)
-        y = hole_center_y + hole_radius * np.sin(angle)
-        vertices.append([x, y, 0])  # Bottom hole vertices
+    # Vertex layout: outer top, outer bottom, hole top, hole bottom
+    outer_top = 0
+    outer_bottom = num_points
+    hole_top = 2 * num_points
+    hole_bottom = 3 * num_points
+    for x, y in outer_points:
+        vertices.append([x, y, tab_thickness])
+    for x, y in outer_points:
+        vertices.append([x, y, 0])
+    for x, y in hole_points:
+        vertices.append([x, y, tab_thickness])
+    for x, y in hole_points:
+        vertices.append([x, y, 0])
 
-    # TOP FACE - Create triangles by connecting tab corners to hole vertices
-    # We need to create a "ring" of triangles around the hole
-    # Connect each edge of the tab to the corresponding hole vertices
+    for i in range(num_points):
+        j = (i + 1) % num_points
 
-    # Bottom edge to hole (vertices 4-5 to hole vertices 5-6-7-0)
-    triangles.append((4, hole_vertices_top_start + 5, hole_vertices_top_start + 6))
-    triangles.append((4, hole_vertices_top_start + 6, hole_vertices_top_start + 7))
-    triangles.append((4, hole_vertices_top_start + 7, 5))
-    triangles.append((5, hole_vertices_top_start + 7, hole_vertices_top_start + 0))
+        # Top face ring (counter-clockwise viewed from above, normal +Z)
+        triangles.append((outer_top + i, outer_top + j, hole_top + j))
+        triangles.append((outer_top + i, hole_top + j, hole_top + i))
 
-    # Right edge to hole (vertices 5-6 to hole vertices 0-1-2)
-    triangles.append((5, hole_vertices_top_start + 0, hole_vertices_top_start + 1))
-    triangles.append((5, hole_vertices_top_start + 1, 6))
-    triangles.append((6, hole_vertices_top_start + 1, hole_vertices_top_start + 2))
+        # Bottom face ring (reversed winding, normal -Z)
+        triangles.append((outer_bottom + i, hole_bottom + j, outer_bottom + j))
+        triangles.append((outer_bottom + i, hole_bottom + i, hole_bottom + j))
 
-    # Top edge to hole (vertices 6-7 to hole vertices 2-3-4)
-    triangles.append((6, hole_vertices_top_start + 2, hole_vertices_top_start + 3))
-    triangles.append((6, hole_vertices_top_start + 3, 7))
-    triangles.append((7, hole_vertices_top_start + 3, hole_vertices_top_start + 4))
+        # Outer wall, normal pointing away from the tab
+        triangles.append((outer_bottom + i, outer_bottom + j, outer_top + j))
+        triangles.append((outer_bottom + i, outer_top + j, outer_top + i))
 
-    # Left edge to hole (vertices 7-4 to hole vertices 4-5)
-    triangles.append((7, hole_vertices_top_start + 4, hole_vertices_top_start + 5))
-    triangles.append((7, hole_vertices_top_start + 5, 4))
-
-    # BOTTOM FACE - Same pattern but reversed winding
-    # Bottom edge to hole (vertices 0-1 to hole vertices 5-6-7-0)
-    triangles.append((0, hole_vertices_bottom_start + 6, hole_vertices_bottom_start + 5))
-    triangles.append((0, hole_vertices_bottom_start + 7, hole_vertices_bottom_start + 6))
-    triangles.append((0, 1, hole_vertices_bottom_start + 7))
-    triangles.append((1, hole_vertices_bottom_start + 0, hole_vertices_bottom_start + 7))
-
-    # Right edge to hole (vertices 1-2 to hole vertices 0-1-2)
-    triangles.append((1, hole_vertices_bottom_start + 1, hole_vertices_bottom_start + 0))
-    triangles.append((1, 2, hole_vertices_bottom_start + 1))
-    triangles.append((2, hole_vertices_bottom_start + 2, hole_vertices_bottom_start + 1))
-
-    # Top edge to hole (vertices 2-3 to hole vertices 2-3-4)
-    triangles.append((2, hole_vertices_bottom_start + 3, hole_vertices_bottom_start + 2))
-    triangles.append((2, 3, hole_vertices_bottom_start + 3))
-    triangles.append((3, hole_vertices_bottom_start + 4, hole_vertices_bottom_start + 3))
-
-    # Left edge to hole (vertices 3-0 to hole vertices 4-5)
-    triangles.append((3, hole_vertices_bottom_start + 5, hole_vertices_bottom_start + 4))
-    triangles.append((3, 0, hole_vertices_bottom_start + 5))
-
-    # SIDE WALLS
-    # Back face (connecting to QR code base)
-    triangles.append((0, 1, 4))
-    triangles.append((1, 5, 4))
-
-    # Front face (away from QR code)
-    triangles.append((3, 7, 2))
-    triangles.append((2, 7, 6))
-
-    # Left side
-    triangles.append((0, 4, 3))
-    triangles.append((3, 4, 7))
-
-    # Right side
-    triangles.append((1, 2, 5))
-    triangles.append((2, 6, 5))
-
-    # HOLE WALLS - normals should point outward (away from hole center)
-    for i in range(num_sides):
-        next_i = (i + 1) % num_sides
-        top_i = hole_vertices_top_start + i
-        top_next = hole_vertices_top_start + next_i
-        bottom_i = hole_vertices_bottom_start + i
-        bottom_next = hole_vertices_bottom_start + next_i
-
-        # Two triangles per wall segment with correct winding for outward normals
-        triangles.append((top_i, top_next, bottom_i))
-        triangles.append((top_next, bottom_next, bottom_i))
+        # Hole wall, normal pointing into the hole
+        triangles.append((hole_top + i, hole_top + j, hole_bottom + i))
+        triangles.append((hole_top + j, hole_bottom + j, hole_bottom + i))
 
     return vertices, triangles
 
@@ -1042,6 +1142,9 @@ def convert_qr_to_stl(
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
     debug: bool = False,
+    back_text: str | None = None,
+    back_text_size_mm: float = 4.0,
+    back_text_depth_mm: float = 0.6,
 ) -> Path:
     """Convert a QR code image to an STL file.
 
@@ -1068,9 +1171,15 @@ def convert_qr_to_stl(
         mount_type: Type of mounting feature ('keychain' or 'holes')
         hole_diameter: Diameter of mounting holes in mm
         debug: If True, enable mesh validation and save debug visualization
+        back_text: Optional text recessed (mirrored) into the bottom face
+        back_text_size_mm: Height of capital letters in the back text in mm
+        back_text_depth_mm: How deep the back text is recessed in mm
 
     Returns:
         Path to the saved STL file
+
+    Raises:
+        ValueError: If the back text is too deep for the base or does not fit
     """
     # Prepare output path with .stl extension
     output_path = prepare_output_path(output_path, ".stl")
@@ -1114,6 +1223,18 @@ def convert_qr_to_stl(
     if debug:
         debug_path = output_path.with_suffix(".debug.png")
 
+    # Recess back text into the bottom face, keeping at least 0.4mm of material above it
+    bottom_map = None
+    if back_text:
+        thinnest = float(np.min(height_map))
+        if back_text_depth_mm > thinnest - 0.4:
+            raise ValueError(
+                f"Back text depth {back_text_depth_mm}mm is too deep for a {thinnest}mm base. "
+                f"Use a depth of at most {thinnest - 0.4:.1f}mm or a thicker base."
+            )
+        text_mask = render_back_text_mask(back_text, height_map.shape, pixel_size, back_text_size_mm)
+        bottom_map = np.where(text_mask, back_text_depth_mm, 0.0)
+
     # Create STL mesh
     stl_mesh = create_stl_from_heightmap(
         height_map,
@@ -1122,6 +1243,7 @@ def convert_qr_to_stl(
         hole_diameter=hole_diameter,
         validate_and_repair=True,
         debug_path=debug_path,
+        bottom_map=bottom_map,
     )
 
     # Save STL file
@@ -1140,6 +1262,9 @@ def convert_qr_to_stl(
 
     if mount_type:
         logger.info(f"Added {mount_type} mount with {hole_diameter:.1f}mm hole diameter")
+
+    if back_text:
+        logger.info(f"Recessed back text {back_text_depth_mm:.1f}mm into the bottom face")
 
     return output_path
 

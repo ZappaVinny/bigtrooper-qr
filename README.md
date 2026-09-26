@@ -497,6 +497,28 @@ Mounting features:
 
 Note: The keychain mount creates a complete box structure extending from the QR base with proper hole geometry that renders correctly in all 3D slicers.
 
+#### Back Text
+Recess text into the back (bottom face) of an STL, such as a name and phone number on a pet tag:
+```bash
+# Two lines of text on the back, separated with \n
+par_qr_3d qr "https://example.com/pet" --type url \
+  --base-width 28 --base-height 28 --base-thickness 1.6 \
+  --mount keychain \
+  --back-text "BUDDY\n555-1234"
+
+# Larger, deeper text
+par_qr_3d qr "Data" --back-text "HELLO" --back-text-size 6 --back-text-depth 0.8
+```
+
+Back text features:
+- **Mirrored**: Reads correctly when the model is flipped over
+- **Recessed**: Cut into the bed-side face, so it prints cleanly with no supports
+- **Auto-fit**: Text is centered and shrinks automatically (with a warning) if it does not fit at the requested size
+- **Size**: `--back-text-size` sets capital letter height in mm (default 4mm)
+- **Depth**: `--back-text-depth` sets recess depth in mm (default 0.6mm); at least 0.4mm of material is always kept above the text
+- **Resolution**: Text uses the same pixel grid as the QR code; raise `--size` (e.g. 400) for smoother letters
+- **STL only**: Not supported with `--format 3mf`
+
 #### PNG-Only Mode
 Skip STL generation and only create PNG images:
 ```bash
@@ -874,6 +896,9 @@ The tool uses different geometry generation approaches for each output format to
 | `--layer-heights` | `-LH` | Comma-separated layer heights in mm | `None` |
 | `--mount` | `-m` | Add mounting feature: keychain, holes | `None` |
 | `--hole-diameter` | `-hd` | Diameter of mounting holes in mm (1-10) | `4.0` |
+| `--back-text` | `-bt` | Text recessed into the back of the STL (use `\n` for new lines) | `None` |
+| `--back-text-size` | `-bts` | Height of capital letters in the back text in mm (2-30) | `4.0` |
+| `--back-text-depth` | `-btd` | How deep the back text is recessed in mm (0.2-5) | `0.6` |
 | `--save-png/--no-save-png` | `-p/-P` | Save PNG image | `True` |
 | `--save-svg/--no-save-svg` | `-v/-V` | Save SVG file | `False` |
 | `--display` | `-T` | Display QR code in terminal | `False` |

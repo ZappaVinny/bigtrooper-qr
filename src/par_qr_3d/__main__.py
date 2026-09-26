@@ -373,6 +373,34 @@ def qr_command(
             max=10.0,
         ),
     ] = 4.0,
+    back_text: Annotated[
+        str | None,
+        typer.Option(
+            "--back-text",
+            "-bt",
+            help="Text recessed into the back of the STL (mirrored to read correctly). Use \\n for new lines",
+        ),
+    ] = None,
+    back_text_size: Annotated[
+        float,
+        typer.Option(
+            "--back-text-size",
+            "-bts",
+            help="Height of capital letters in the back text in mm (shrinks automatically if it does not fit)",
+            min=2.0,
+            max=30.0,
+        ),
+    ] = 4.0,
+    back_text_depth: Annotated[
+        float,
+        typer.Option(
+            "--back-text-depth",
+            "-btd",
+            help="How deep the back text is recessed in mm",
+            min=0.2,
+            max=5.0,
+        ),
+    ] = 0.6,
     frame_style: Annotated[
         str | None,
         typer.Option(
@@ -539,6 +567,9 @@ def qr_command(
         layer_heights: Comma-separated layer heights in mm. First is base, second is QR, optional third is frame.
         mount: Type of mounting feature to add (keychain for keyring loop, holes for screw holes).
         hole_diameter: Diameter of mounting holes in mm.
+        back_text: Text recessed (mirrored) into the back of the STL model.
+        back_text_size: Height of capital letters in the back text in mm.
+        back_text_depth: How deep the back text is recessed in mm.
         frame_style: Style of decorative frame (square, rounded, hexagon, octagon).
         frame_width: Width of the frame border in pixels.
         frame_color: Color of the frame (name or hex code).
@@ -679,6 +710,10 @@ def qr_command(
         if mount:
             mount = validate_choice(mount, ["keychain", "holes"], "mount type")
 
+        if back_text and output_format.lower() == "3mf":
+            console.print("[bold red]Error:[/bold red] --back-text is only supported for STL output")
+            raise typer.Exit(code=1)
+
         # Process multi-layer parameters
         parsed_layer_heights = None
         if multi_layer:
@@ -803,6 +838,9 @@ def qr_command(
                         mount_type=mount,
                         hole_diameter=hole_diameter,
                         debug=debug,
+                        back_text=back_text,
+                        back_text_size_mm=back_text_size,
+                        back_text_depth_mm=back_text_depth,
                     )
                 else:
                     model_path = convert_qr_to_stl(
@@ -815,6 +853,9 @@ def qr_command(
                         mount_type=mount,
                         hole_diameter=hole_diameter,
                         debug=debug,
+                        back_text=back_text,
+                        back_text_size_mm=back_text_size,
+                        back_text_depth_mm=back_text_depth,
                     )
                 console.print(f"[green]✓[/green] Created STL file: {model_path}")
 
@@ -857,6 +898,8 @@ def qr_command(
                 if mount == "keychain":
                     mount_info += f" (hole: {hole_diameter}mm)"
                 model_info["Mount"] = mount_info
+            if back_text:
+                model_info["Back Text"] = f'"{back_text}" ({back_text_size}mm letters, {back_text_depth}mm deep)'
             summary.update(model_info)
         else:
             summary["3D Generation"] = "Disabled"
