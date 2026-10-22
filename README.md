@@ -1,60 +1,63 @@
 # bigtrooper-qr
 
-A Python library that generates 3D printable QR code tags for BigTrooper. Pass in a URL (or other data) plus some options, and get back STL, 3MF, PNG or SVG files as bytes. It's built to sit behind a web API, but works in any Python script.
+Generates 3D printable QR code tags for BigTrooper. The repo has two parts:
 
-![qr_slicer.png](qr_slicer.png)
+- **`bigtrooper_qr/`**, the library. Pass in a URL (or other data) and options, and get back STL, 3MF, PNG or SVG files as bytes.
+- **`app/`**, a FastAPI service that runs as a container in the web app's docker compose, so the Go backend can generate tags over the internal network.
+
+| Doc | What's in it |
+|---|---|
+| [LIBRARY.md](LIBRARY.md) | Every library option, errors, and printing guidance |
+| [PLAN.md](PLAN.md) | How the service will be wired up: the endpoint, R2 uploads, and the Go side (not built yet) |
 
 ## Features
-
 - **QR types:** text, URL, email, phone, SMS, WiFi, contact card (vCard)
-- **3D output:** binary STL, or multi-color 3MF
-- **2D output:** PNG preview, SVG vector
+- **Outputs:** binary STL, multi-color 3MF, PNG preview, SVG
 - **Tag features:** rounded keychain tab with a configurable hole, and multi-line text recessed into the back
-- **Styling:** front label, center text or emoji, logo overlay, frames, circle/dot/rounded modules, multi-layer heights, colors, inverted mode
-- **In memory:** no files are written; outputs come back as bytes
-- **Repeatable:** identical options produce identical bytes
-- **Fast:** a 28mm collar tag takes about 0.1–0.4 seconds
+- **Styling:** front label, center text or emoji, logo overlay (library only), frames, module styles, multi-layer heights, colors
+- **In memory and repeatable:** no files are written, and the same options always give the same bytes. A 28mm collar tag takes about 0.1–0.4 seconds.
 
-## Install
+## Run locally
 
-Requires Python 3.11–3.13.
+Requires Python 3.12.
 
 ```bash
-uv add "bigtrooper-qr @ git+https://github.com/ZappaVinny/bigtrooper-qr"
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+uvicorn app.main:app --reload        # service on http://127.0.0.1:8000 (GET / returns {"status": "ok"})
 ```
 
-## Quick start
+Use the library directly from the repo root:
 
 ```python
 from pathlib import Path
-from bigtrooper_qr import QRType, generate_qr_model
+from bigtrooper_qr import generate_qr_model
 
 result = generate_qr_model(
-    data="https://8bt/Hs3Sr",
-    qr_type=QRType.URL,
-    base_width=28, base_height=28,      # mm
-    base_thickness=1.6, qr_depth=0.6,   # mm
+    data="https://8bt/Hs3Sr", qr_type="url",
+    base_width=28, base_height=28, base_thickness=1.6, qr_depth=0.6,
     mount="keychain", hole_diameter=3.5,
-    back_text="SCAN ME\nIN LIGHT",
-    size=300,
+    back_text="SCAN ME\nIN LIGHT", size=300,
     formats=("stl", "png"),
 )
-
 Path("collar_tag.stl").write_bytes(result.stl)
-Path("collar_tag.png").write_bytes(result.png)
 ```
 
-**See [LIBRARY.md](LIBRARY.md) for the full reference:** every option, errors, printing guidance, and notes on running it behind an API.
-
-## Development
+## Run with Docker
 
 ```bash
-uv sync          # install dependencies
-make checkall    # format, lint, type check
-make test        # run the test suite
-make example     # generate the example collar tag into ./output
+cp .env.example .env          # optional; every setting has a default
+docker compose up -d --build
+docker compose ps             # qr-api should show (healthy)
 ```
+
+- The container listens on port 8000 **inside the Docker network only**. There's no port mapping to the host, by design.
+- To add it to the web app's stack, `include:` this repo's `docker-compose.yml` from the web app's compose (see PLAN.md).
+- The image targets `linux/amd64`, because the lib3mf dependency has no ARM Linux build.
+- Settings are environment variables, all documented in [.env.example](.env.example).
 
 ## Credits
 
-Forked from [paulrobello/par_qr_3d](https://github.com/paulrobello/par_qr_3d) by Paul Robello, MIT licensed. This fork turns the original CLI into a library and adds the rounded keychain tab, recessed back text, and in-memory output. See [LICENSE](LICENSE).
+Forked from [paulrobello/par_qr_3d](https://github.com/paulrobello/par_qr_3d) by Paul Robello, MIT licensed. This fork turns the original CLI into a library and service, and adds the rounded keychain tab, recessed back text, and in-memory output. See [LICENSE](LICENSE).

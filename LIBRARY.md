@@ -33,17 +33,17 @@
 
 ## Install
 
-Requires Python 3.11 to 3.13. (Python 3.14 is not supported yet by every dependency.)
+Requires Python 3.12 (the version the Docker image uses; 3.11 and 3.13 also work, but 3.14 is not supported by every dependency yet). The library is the `bigtrooper_qr/` folder at the repo root, and its dependencies are pinned in `requirements.txt`.
 
 ```bash
-# Add to another project from the git repo
-uv add "bigtrooper-qr @ git+https://github.com/ZappaVinny/bigtrooper-qr"
-
-# Or work on this repo directly
 git clone https://github.com/ZappaVinny/bigtrooper-qr.git
 cd bigtrooper-qr
-uv sync
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
+
+Run scripts from the repo root (so `import bigtrooper_qr` finds the folder), or copy the `bigtrooper_qr/` folder into another project. `requirements.txt` also includes the FastAPI service's packages; the library itself only needs `qrcode[pil]`, `numpy-stl`, `scipy`, `lib3mf` and `pydantic`.
 
 ## Quick start
 
@@ -73,7 +73,7 @@ Path("collar_tag.png").write_bytes(result.png)
 print(result.warnings)  # [] when everything fit as requested
 ```
 
-The same script lives at [`examples/make_tag.py`](examples/make_tag.py). Run it with `make example`, which writes to `./output/`.
+Open the STL in your slicer to check it before printing.
 
 ## The `generate_qr_model` function
 
@@ -345,7 +345,9 @@ Learned from test prints with a 0.4mm nozzle.
 
 ## Using it behind an API
 
-`generate_qr_model` holds no state and is safe to call from many workers at once. Things to plan for when wrapping it in a web service (FastAPI or similar):
+This repo's own FastAPI service lives in `app/`, and how it will call the library is described in [PLAN.md](PLAN.md). The notes below apply to that service or any other wrapper.
+
+`generate_qr_model` holds no state and is safe to call from many workers at once. Things to plan for when wrapping it in a web service:
 
 **It's CPU-bound.** Don't call it directly inside an `async def` endpoint, because it will block the event loop. Either:
 - declare the endpoint with plain `def` (FastAPI runs it in a threadpool), or
@@ -367,7 +369,7 @@ A 3MF at `size=200` takes about 0.4s and is about 1.3 MB, since it's zip-compres
 
 **Request bodies.**
 - `QRModelOptions` can be used directly as a FastAPI request body model. Its validation then becomes your API validation.
-- `overlay_image` is bytes. Accept it as a multipart `UploadFile` and pass `await file.read()`, rather than putting it in JSON.
+- `overlay_image` is bytes, which don't fit well in JSON. This repo's service doesn't expose it. A wrapper that needs it should accept a multipart `UploadFile` and pass `await file.read()`.
 
 **Responses.**
 - Return the bytes directly: `Response(content=result.stl, media_type="model/stl")`, `"model/3mf"`, `"image/png"`, or `"image/svg+xml"`.

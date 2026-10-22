@@ -4,55 +4,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-bigtrooper-qr (import name `bigtrooper_qr`) is a Python library that generates 3D printable QR code tags (STL, 3MF) and QR images (PNG, SVG) entirely in memory. It is a fork of paulrobello/par_qr_3d, converted from a CLI into a library so a FastAPI service (in Docker, called by a Go backend) can import it. The API service itself lives elsewhere; this repo is only the library.
+bigtrooper-qr generates 3D printable QR code tags. It has two parts:
+- **`bigtrooper_qr/`:** the library. It produces STL, 3MF, PNG and SVG as bytes, entirely in memory.
+- **`app/`:** a FastAPI service. It runs as one container in the web app's docker compose, and the Go backend calls it over the internal network.
 
-The full user-facing reference is [LIBRARY.md](LIBRARY.md). Keep it in sync with any option or behavior change.
+The intended service flow:
+1. Go POSTs QR options plus presigned R2 PUT URLs.
+2. The service generates the files and uploads them to R2.
+3. It replies with file info, and Go hands a download link to the frontend.
 
-## Development Commands
-- `uv sync`: install dependencies (Python 3.12 is pinned in `.python-version`; 3.14 breaks some dependency builds)
-- `make checkall`: format, lint and type check. Run after any code change.
-- `make test`: run the pytest suite
-- `make example`: run `examples/make_tag.py`, which writes the collar tag to `./output/`
-- `uv add <package>` / `uv remove <package>`: manage dependencies
+**Only a `GET /` status route exists so far.** The wiring is specified in [PLAN.md](PLAN.md); follow it when building the endpoint.
 
-## Architecture
+The repo is a fork of paulrobello/par_qr_3d. It was deliberately stripped to only what produces QR codes: no tests, no uv/pyproject packaging, no lint/type-check tooling. Don't reintroduce them unless asked.
 
-### Package layout (`src/bigtrooper_qr/`)
-- `__init__.py`: public exports (`generate_qr_model`, `QRModelOptions`, `QRModelResult`, `QRModelError`, `QRType`, `ErrorCorrectionLevel`), `__version__`, and a logging `NullHandler`
-- `api.py`: the public entry point
-  - `QRModelOptions` is a pydantic model holding every option, its range and color checks
-  - `generate_qr_model()` runs the pipeline
-  - `QRModelResult` is a dataclass of output bytes plus warnings
-- `errors.py`: `QRModelError(ValueError)` for invalid combinations and content that doesn't fit
-- `qr_generator.py`: the 2D steps. QR types and formatting, artistic modules, border crop, label, center text, overlay, frames, PNG encoding, SVG generation.
-- `stl_converter.py`: the 3D steps
-  - height maps and the STL mesh (`create_stl_from_heightmap`), with `add_recessed_bottom` for back text
-  - the rounded keychain tab (`generate_keychain_mount_geometry`)
-  - the 3MF builder (lib3mf)
-  - `convert_qr_to_stl` and `convert_qr_to_3mf`, which return bytes
-- `utils/`: `color_utils` (color parsing, 3MF colors), `font_utils` (bundled font loading), `image_utils` (image mode helpers)
-- `fonts/`: Roboto-Black (labels, back text), DejaVuSans (Unicode), NotoEmoji (emoji center text)
+## Running
+- **Setup:** `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` (Python 3.12; 3.14 breaks some dependency builds)
+- **Service:** `uvicorn app.main:app --reload`, then check `GET /` (returns `{"status": "ok"}`)
+- **Docker:** `docker compose up -d --build`. The service is internal only (`expose`, no `ports`); check it with `docker compose ps`.
+- **Library:** run Python from the repo root and `import bigtrooper_qr`. There's no package install.
 
-### Pipeline
-`generate_qr_code` → `crop_qr_border` → optional label, center text, overlay and frame → image outputs (PNG, SVG) and/or model outputs (`convert_qr_to_stl`, `convert_qr_to_3mf`).
+## Layout
+- `bigtrooper_qr/__init__.py`: public exports (`generate_qr_model`, `QRModelOptions`, `QRModelResult`, `QRModelError`, `QRType`, `ErrorCorrectionLevel`), `__version__`, and a logging NullHandler
+- `bigtrooper_qr/api.py`: `QRModelOptions` (pydantic: every option, its range, color checks), `generate_qr_model()` (the pipeline), and `QRModelResult`
+- `bigtrooper_qr/errors.py`: `QRModelError(ValueError)`
+- `bigtrooper_qr/qr_generator.py`: 2D steps (QR types, styles, crop, label, center text, overlay, frames, PNG, SVG)
+- `bigtrooper_qr/stl_converter.py`: 3D steps (height-map STL mesh, recessed back text, rounded keychain tab, 3MF via lib3mf); returns bytes
+- `bigtrooper_qr/utils/`: color, font and image helpers
+- `bigtrooper_qr/fonts/`: Roboto-Black, DejaVuSans, NotoEmoji
+- `app/main.py`: a minimal FastAPI app with only `GET /`, which the Docker healthcheck also uses. Keep it simple.
+- `.env.example`: the `BTQR_*` settings planned for the wiring step (nothing reads them yet)
+- `requirements.txt`: exact pins for every package, targeting Python 3.12 on linux/amd64
+- `Dockerfile`, `docker-compose.yml`, `.dockerignore`: one simple service, `qr-api`, built to be `include:`d by the web app's compose
+- `LIBRARY.md` is the library reference and `PLAN.md` the wiring plan. Keep both in sync with changes.
 
-### Key design rules
-- **Nothing touches the filesystem.** Outputs are bytes. `overlay_image` takes bytes, not a path, so API input can't read server files.
-- **Output is deterministic.** The STL is written by hand without numpy-stl's timestamped header.
-- **No runtime mesh repair.** Faces must be wound correctly when generated (normals pointing out of the solid). `tests/test_api.py::test_mesh_is_consistently_oriented` checks this using signed volume, so keep it passing whenever geometry code changes.
-- **Size limits:** the STL face buffer is preallocated in `create_stl_from_heightmap`, so any new geometry must add its triangle count there (for example `KEYCHAIN_TRIANGLE_COUNT`).
-- **Back text** is STL only, mirrored, and auto-shrinks with a warning. It must leave at least 0.4mm of material above it.
-- **Errors:** library code raises `QRModelError` for caller mistakes. Never print or exit.
-
-### Key Dependencies
-- Runtime: `qrcode[pil]`, `numpy-stl`, `scipy` (frame detection for multi-layer), `lib3mf` (3MF), `pydantic` (options validation)
-- Dev: `pytest`, `trimesh` (tests only), `ruff`, `pyright`
-
-### Configuration
-- ruff: line length 120, Google-style docstrings
-- pyright: basic mode, checks `src/`, `tests/`, `examples/`
-
-### Development Standards
-- Type annotations on all functions and methods, and Google-style docstrings
-- Use `logging.getLogger(__name__)`. Never configure logging handlers in library code.
-- When adding an option, update `QRModelOptions`, the pipeline in `api.py`, the tests, and LIBRARY.md.
+## Key Rules
+- **Nothing touches the filesystem;** outputs are bytes. `overlay_image` takes bytes, never a path, and isn't exposed by the API.
+- **Output is deterministic.** The STL header is written by hand, with no timestamp.
+- **No runtime mesh repair.** Faces must be generated with outward-facing winding. After any geometry change, check that the mesh's signed volume (the sum of v0·(v1×v2)/6 over all triangles) equals the volume implied by the height map plus the tab. The collar tag at `size=300` with back text "SCAN ME\nIN LIGHT" gives 308,700 faces and a volume of 1602.717 mm³. Then slice a generated STL.
+- **Preallocated face buffer:** new geometry must add its triangle count in `create_stl_from_heightmap`.
+- **Back text** is STL only and mirrored. It auto-shrinks with a warning, and must leave at least 0.4mm of material above it.
+- **Errors:** library code raises `QRModelError` for caller mistakes. It never prints or exits.
+- **Never log presigned URLs** (the query string is a credential); log only the host.
+- Use `logging.getLogger(__name__)`. Don't configure handlers in library code; `app/main.py` does that.
+- **Code style:** type annotations and Google-style docstrings on all functions, line length 120.
+- **Adding a library option** means updating `QRModelOptions`, the pipeline in `api.py`, and LIBRARY.md.
