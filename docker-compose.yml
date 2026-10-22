@@ -1,0 +1,24 @@
+# The qr-api service. Run it on its own with `docker compose up -d`, or pull it into the
+# web app's compose with `include: - path: ../bigtrooper-qr/docker-compose.yml` (or copy the
+# service block). The Go backend reaches it at http://qr-api:8000 on the backend network.
+services:
+  qr-api:
+    build: .
+    image: bigtrooper-qr:latest
+    platform: linux/amd64  # lib3mf has no ARM Linux wheel
+    env_file:
+      - path: .env  # copy from .env.example; every setting has a default, so it's optional
+        required: false
+    expose:
+      - "8000"  # internal only: no `ports:` mapping, so nothing outside the Docker network can call it
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    # Healthcheck comes from the Dockerfile, so other services can use
+    # `depends_on: { qr-api: { condition: service_healthy } }`
+
+networks:
+  backend:

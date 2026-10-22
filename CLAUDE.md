@@ -4,109 +4,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Par QR 3D is a CLI tool that generates 3D printable STL and 3MF files from QR codes. It allows users to create QR codes with custom data and convert them into 3D models suitable for 3D printing. The project supports advanced features like color materials, mounting options, multi-layer heights, and artistic styles. Built with modern Python tooling and follows best practices for type safety and code quality.
+bigtrooper-qr generates 3D printable QR code tags. It has two parts:
+- **`bigtrooper_qr/`:** the library. It produces STL, 3MF, PNG and SVG as bytes, entirely in memory.
+- **`app/`:** a FastAPI service. It runs as one container in the web app's docker compose, and the Go backend calls it over the internal network.
 
-## Development Commands
+The intended service flow:
+1. Go POSTs QR options plus presigned R2 PUT URLs.
+2. The service generates the files and uploads them to R2.
+3. It replies with file info, and Go hands a download link to the frontend.
 
-### Core Development Workflow
-- `make checkall` - Format code, run linter, and type check (run after any code changes)
-- `uv run par_qr_3d --help` - Show available commands
-- `uv run par_qr_3d qr "Your QR data"` - Generate QR code from data
-- `make run` - Run the application
+**Only a `GET /` status route exists so far.** The wiring is specified in [PLAN.md](PLAN.md); follow it when building the endpoint.
 
-### Package Management
-- `uv sync` - Sync dependencies
-- `uv add <package>` - Add new dependencies
-- `uv remove <package>` - Remove dependencies
-- `make depsupdate` - Update all dependencies
-- `make setup` - Initial setup (uv lock + sync)
-- `make resetup` - Recreate virtual environment from scratch
+The repo is a fork of paulrobello/par_qr_3d. It was deliberately stripped to only what produces QR codes: no tests, no uv/pyproject packaging, no lint/type-check tooling. Don't reintroduce them unless asked.
 
-### Code Quality Tools
-- `make format` - Format code with ruff
-- `make lint` - Run ruff linter with fixes
-- `make typecheck` - Run pyright type checker
-- `make pre-commit` - Run pre-commit hooks
+## Running
+- **Setup:** `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` (Python 3.12; 3.14 breaks some dependency builds)
+- **Service:** `uvicorn app.main:app --reload`, then check `GET /` (returns `{"status": "ok"}`)
+- **Docker:** `docker compose up -d --build`. The service is internal only (`expose`, no `ports`); check it with `docker compose ps`.
+- **Library:** run Python from the repo root and `import bigtrooper_qr`. There's no package install.
 
-### Profiling
-- `make profile` - Profile with scalene
-- `make profile2` - Profile with pyinstrument
+## Layout
+- `bigtrooper_qr/__init__.py`: public exports (`generate_qr_model`, `QRModelOptions`, `QRModelResult`, `QRModelError`, `QRType`, `ErrorCorrectionLevel`), `__version__`, and a logging NullHandler
+- `bigtrooper_qr/api.py`: `QRModelOptions` (pydantic: every option, its range, color checks), `generate_qr_model()` (the pipeline), and `QRModelResult`
+- `bigtrooper_qr/errors.py`: `QRModelError(ValueError)`
+- `bigtrooper_qr/qr_generator.py`: 2D steps (QR types, styles, crop, label, center text, overlay, frames, PNG, SVG)
+- `bigtrooper_qr/stl_converter.py`: 3D steps (height-map STL mesh, recessed back text, rounded keychain tab, 3MF via lib3mf); returns bytes
+- `bigtrooper_qr/utils/`: color, font and image helpers
+- `bigtrooper_qr/fonts/`: Roboto-Black, DejaVuSans, NotoEmoji
+- `app/main.py`: a minimal FastAPI app with only `GET /`, which the Docker healthcheck also uses. Keep it simple.
+- `.env.example`: the `BTQR_*` settings planned for the wiring step (nothing reads them yet)
+- `requirements.txt`: exact pins for every package, targeting Python 3.12 on linux/amd64
+- `Dockerfile`, `docker-compose.yml`, `.dockerignore`: one simple service, `qr-api`, built to be `include:`d by the web app's compose
+- `LIBRARY.md` is the library reference and `PLAN.md` the wiring plan. Keep both in sync with changes.
 
-
-### Development Guidelines
-- **Important:** Run `npm run lint && npm run build` after code changes. You do not need to run lint and build for documentation changes.
-- ALWAYS update documentation when making architectural or event related changes
-- Use `uv run` for Python scripts
-
-
-## Project Architecture
-
-### Core Structure
-- **src/par_qr_3d/**: Main package directory
-  - `__init__.py`: Package metadata and version info
-  - `__main__.py`: CLI entry point using Typer with comprehensive QR options
-  - `logging_config.py`: Logging setup with Rich integration
-  - `qr_generator.py`: QR code generation with various types and styles
-  - `stl_converter.py`: 3D model generation with shared geometry functions
-  - **utils/**: Shared utility modules
-    - `color_utils.py`: Color parsing, RGB normalization, 3MF format conversion
-    - `font_utils.py`: Font loading with bundled fonts and emoji detection
-    - `image_utils.py`: Image mode conversion utilities
-    - `validation_utils.py`: Input validation and conflict checking
-    - `path_utils.py`: File path handling and preparation
-    - `platform_utils.py`: OS-specific operations (file opening)
-
-### Entry Points
-- CLI script: `par_qr_3d`
-- Main app: `par_qr_3d.__main__:app`
-
-### Key Dependencies
-- `typer` - Modern CLI framework
-- `rich` - Terminal formatting and output
-- `qrcode` - QR code generation
-- `numpy-stl` - STL file creation
-- `lib3mf` - 3MF file format support
-- `scipy` - Connected component analysis for frame detection
-- `Pillow` - Image processing
-- `pydantic` - Data validation
-- `python-dotenv` - Environment variable management
-
-### Configuration
-- **Python**: 3.11+ required
-- **ruff**: Line length 120, Google-style docstrings
-- **pyright**: Basic type checking, Python 3.12 target
-- **Environment**: Loads from `.env` and `~/.par_qr_3d.env`
-
-### Development Standards
-- Type annotations required for all functions and methods
-- Google-style docstrings
-- UTF-8 encoding for file operations
-- Uses `uv` for package management
-- Follows src/ layout pattern
-- Error handling with user-friendly messages via Rich console
-
-## Current Implementation Status
-
-The project has a complete implementation for generating 3D printable files from QR codes:
-
-### Completed Features
-- **QR Code Types**: text, URL, WiFi, email, phone, SMS, contact cards (vCard)
-- **3D Formats**: STL (monochrome) and 3MF (with color materials)
-- **Export Formats**: PNG (raster), SVG (vector)
-- **Visual Features**: Custom colors, text labels, center text/emoji (with bundled fonts), image overlays, decorative frames, artistic patterns
-- **3D Features**: Multi-layer heights, mounting options (keychain loops), inverted mode
-- **UI Features**: Auto-open generated files, terminal QR display, rich progress output
-- **Advanced**: Frame detection using connected component analysis, shared geometry generation for consistency
-
-### Architecture Highlights
-- **Shared Utilities**: Centralized utilities eliminate code duplication (~440+ lines saved)
-- **Shared Geometry**: Common functions generate vertices/triangles for both STL and 3MF
-- **Component Tracking**: Geometry tagged by component type (base, QR, walls) for material assignment
-- **Smart Triangulation**: Ring-pattern triangulation for proper hole geometry in keychain mounts
-- **Format Optimization**: STL includes walls for printing, 3MF optimized for visual rendering
-- **Cross-Platform**: Font loading and file opening work on macOS, Linux, and Windows
-- **Bundled Fonts**: Includes NotoEmoji-Regular.ttf for emoji, DejaVuSans.ttf for Unicode, Roboto-Black.ttf for labels
-- **Type Safety**: Full type annotations with pyright checking
-
-## Known Test Limitations
-- The terminal display of QR image does not work in tests but is working. Do not test that feature. If testing is needed, ask the developer.
+## Key Rules
+- **Nothing touches the filesystem;** outputs are bytes. `overlay_image` takes bytes, never a path, and isn't exposed by the API.
+- **Output is deterministic.** The STL header is written by hand, with no timestamp.
+- **No runtime mesh repair.** Faces must be generated with outward-facing winding. After any geometry change, check that the mesh's signed volume (the sum of v0·(v1×v2)/6 over all triangles) equals the volume implied by the height map plus the tab. The collar tag at `size=300` with back text "SCAN ME\nIN LIGHT" gives 308,700 faces and a volume of 1602.717 mm³. Then slice a generated STL.
+- **Preallocated face buffer:** new geometry must add its triangle count in `create_stl_from_heightmap`.
+- **Back text** is STL only and mirrored. It auto-shrinks with a warning, and must leave at least 0.4mm of material above it.
+- **Errors:** library code raises `QRModelError` for caller mistakes. It never prints or exits.
+- **Never log presigned URLs** (the query string is a credential); log only the host.
+- Use `logging.getLogger(__name__)`. Don't configure handlers in library code; `app/main.py` does that.
+- **Code style:** type annotations and Google-style docstrings on all functions, line length 120.
+- **Adding a library option** means updating `QRModelOptions`, the pipeline in `api.py`, and LIBRARY.md.

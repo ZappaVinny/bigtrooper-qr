@@ -1,0 +1,36 @@
+# Exact pins for every package (direct and indirect) so every build installs the same versions.
+# Target: Python 3.12 on Linux x86_64 (the Docker image). lib3mf has no ARM Linux wheel.
+#
+# Direct dependencies:
+#   bigtrooper_qr library: qrcode[pil], numpy-stl, scipy, lib3mf, pydantic
+#   FastAPI service:       fastapi, uvicorn[standard]
+#
+# To update: write the direct dependencies above into a requirements.in file, run
+#   pip-compile requirements.in -o requirements.txt      (from the pip-tools package)
+# then test-generate a tag and re-add this header.
+annotated-doc==0.0.5
+annotated-types==0.7.0
+anyio==4.14.2
+click==8.5.0
+fastapi==0.128.1
+h11==0.16.0
+httptools==0.9.0
+idna==3.20
+lib3mf==2.4.1
+numpy==2.3.2
+numpy-stl==3.2.0
+pillow==11.3.0
+pydantic==2.11.7
+pydantic-core==2.33.2
+python-dotenv==1.2.4
+python-utils==3.9.1
+pyyaml==6.0.3
+qrcode==8.2
+scipy==1.16.1
+starlette==0.50.0
+typing-extensions==4.15.0
+typing-inspection==0.4.1
+uvicorn==0.54.0
+uvloop==0.23.0
+watchfiles==1.3.0
+websockets==17.3
