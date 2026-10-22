@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from PIL import ImageColor
 
-from ..logging_config import get_logger
-
 if TYPE_CHECKING:
     import lib3mf
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def parse_color(color_str: str, default_color: str = "black") -> tuple[int, int, int]:

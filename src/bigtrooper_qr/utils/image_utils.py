@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from PIL import Image
 
-from ..logging_config import get_logger
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def ensure_grayscale(image: Image.Image) -> Image.Image:

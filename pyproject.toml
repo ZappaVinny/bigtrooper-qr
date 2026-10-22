@@ -1,72 +1,55 @@
 [project]
-name = "par_qr_3d"
+name = "bigtrooper-qr"
 dynamic = [
     "version",
 ]
-description = "Par QR 3D"
+description = "BigTrooper QR: generate 3D printable QR code tags (STL, 3MF) and QR images (PNG, SVG) as a Python library"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    { name = "Paul Robello", email = "probello@gmail.com" },
+    { name = "ZappaVinny" },
 ]
 maintainers = [
-    { name = "Paul Robello", email = "probello@gmail.com" },
+    { name = "ZappaVinny" },
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
-    "Environment :: Console",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Intended Audience :: End Users/Desktop",
-    "Intended Audience :: Other Audience",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Operating System :: MacOS",
-    "Operating System :: Microsoft :: Windows :: Windows 10",
-    "Operating System :: Microsoft :: Windows :: Windows 11",
-    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
 keywords = [
-    "ai",
-    "cli",
-    "tui",
-    "terminal",
+    "qr",
+    "qrcode",
+    "3d-printing",
+    "stl",
+    "3mf",
 ]
 dependencies = [
-    "python-dotenv>=1.1.1",
-    "rich>=14.0.0",
-    "typer>=0.16.0",
     "qrcode[pil]>=8.2",
     "numpy-stl>=3.2.0",
-    "rich-pixels>=3.0.1",
-    "trimesh>=4.6.13",
-    "lxml>=6.0.0",
     "scipy>=1.16.0",
-    "networkx>=3.5",
     "lib3mf>=2.4.1",
+    "pydantic>=2.11.0",
 ]
 packages = [
-    "src/par_qr_3d",
+    "src/bigtrooper_qr",
 ]
 
 [project.license]
 file = "LICENSE"
 
 [project.urls]
-Homepage = "https://github.com/paulrobello/par_qr_3d"
-Documentation = "https://github.com/paulrobello/par_qr_3d/blob/main/README.md"
-Repository = "https://github.com/paulrobello/par_qr_3d"
-Issues = "https://github.com/paulrobello/par_qr_3d/issues"
-Discussions = "https://github.com/paulrobello/par_qr_3d/discussions"
-Wiki = "https://github.com/paulrobello/par_qr_3d/wiki"
-
-[project.scripts]
-par_qr_3d = "par_qr_3d.__main__:app"
+Homepage = "https://github.com/ZappaVinny/bigtrooper-qr"
+Documentation = "https://github.com/ZappaVinny/bigtrooper-qr/blob/main/LIBRARY.md"
+Repository = "https://github.com/ZappaVinny/bigtrooper-qr"
+Issues = "https://github.com/ZappaVinny/bigtrooper-qr/issues"
 
 [build-system]
 requires = [
@@ -81,19 +64,19 @@ dev = [
     "pyright>=1.1.402",
     "pre-commit>=4.2.0",
     "ruff>=0.12.1",
-    "pyinstrument>=5.0.2",
-    "scalene>=1.5.51",
+    "pytest>=8.3.0",
+    "trimesh>=4.6.13",
 ]
 
 [tool.hatch.version]
-path = "src/par_qr_3d/__init__.py"
+path = "src/bigtrooper_qr/__init__.py"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "src/par_qr_3d",
+    "src/bigtrooper_qr",
 ]
 include = [
     "py.typed",
@@ -109,7 +92,7 @@ include = [
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/par_qr_3d",
+    "src/bigtrooper_qr",
     "LICENSE",
     "README.md",
     "pyproject.toml",
@@ -120,3 +103,6 @@ exclude = [
     "*.so",
     "*.dylib",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

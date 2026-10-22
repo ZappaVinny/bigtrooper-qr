@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import unicodedata
 from pathlib import Path
 
 from PIL import ImageFont
 
-from ..logging_config import get_logger
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Emoji-capable font paths (prioritized when emoji detected)
 EMOJI_FONT_PATHS = [

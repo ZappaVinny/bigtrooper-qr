@@ -1,17 +1,24 @@
-"""Par QR 3D."""
+"""BigTrooper QR: generate 3D printable QR code tags (STL, 3MF) and images (PNG, SVG) in memory."""
 
 from __future__ import annotations
 
-import os
+import logging
 
-__author__ = "Paul Robello"
-__credits__ = ["Paul Robello"]
-__maintainer__ = "Paul Robello"
-__email__ = "probello@gmail.com"
-__version__ = "0.2.0"
-__application_title__ = "Par QR 3D"
-__application_binary__ = "par_qr_3d"
-__licence__ = "MIT"
+from .api import QRModelOptions, QRModelResult, generate_qr_model
+from .errors import QRModelError
+from .qr_generator import ErrorCorrectionLevel, QRType
 
+__version__ = "0.3.0"
 
-os.environ["USER_AGENT"] = f"{__application_title__} {__version__}"
+__all__ = [
+    "ErrorCorrectionLevel",
+    "QRModelError",
+    "QRModelOptions",
+    "QRModelResult",
+    "QRType",
+    "__version__",
+    "generate_qr_model",
+]
+
+# Libraries should not configure logging; applications attach their own handlers
+logging.getLogger(__name__).addHandler(logging.NullHandler())

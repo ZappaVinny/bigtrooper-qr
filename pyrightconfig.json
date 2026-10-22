@@ -1,13 +1,14 @@
 {
   "include": [
-    "src/**/*.py"
+    "src/**/*.py",
+    "tests/**/*.py",
+    "examples/**/*.py"
   ],
   "exclude": [
     "**/node_modules",
     "**/__pycache__",
     "**/output",
-    "**/build",
-    "src/par_qr_3d-main-branch/**"
+    "**/build"
   ],
   "ignore": [
     "**/.venv"

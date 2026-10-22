@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import logging
 from enum import Enum
-from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -11,10 +12,10 @@ import qrcode
 from PIL import Image, ImageDraw
 from qrcode.constants import ERROR_CORRECT_H, ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q
 
-from .logging_config import get_logger
-from .utils import ensure_rgb, load_font_with_fallbacks, prepare_output_path
+from .errors import QRModelError
+from .utils import ensure_rgb, load_font_with_fallbacks
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class ErrorCorrectionLevel(str, Enum):
@@ -411,7 +412,7 @@ def add_label_to_qr(
     # Apply threshold using numpy: pixels > threshold become white (255), others become black (0)
     gray_array = np.array(gray_image)
     binary_array = np.where(gray_array > threshold, 255, 0).astype(np.uint8)
-    binary_image = Image.fromarray(binary_array, mode="L")
+    binary_image = Image.fromarray(binary_array)
 
     # Convert back to RGB for consistency
     final_image = binary_image.convert("RGB")
@@ -496,7 +497,7 @@ def add_center_text_to_qr(
         if threshold is not None:
             text_array = np.array(text_img)
             binary_array = np.where(text_array > threshold, 255, 0).astype(np.uint8)
-            text_img = Image.fromarray(binary_array, mode="L")
+            text_img = Image.fromarray(binary_array)
 
         text_img = text_img.convert("RGB")
 
@@ -516,7 +517,7 @@ def add_center_text_to_qr(
 
 def add_overlay_to_qr(
     qr_image: Image.Image,
-    overlay_path: Path,
+    overlay: bytes | Image.Image,
     size_percent: int = 20,
     convert_to_grayscale: bool = True,
 ) -> Image.Image:
@@ -524,7 +525,7 @@ def add_overlay_to_qr(
 
     Args:
         qr_image: PIL Image of the QR code
-        overlay_path: Path to the overlay image file
+        overlay: Overlay image as encoded bytes (PNG, JPEG, ...) or a PIL Image
         size_percent: Size of overlay as percentage of QR code size (10-30)
         convert_to_grayscale: If True, convert overlay to grayscale (default for STL)
 
@@ -540,7 +541,10 @@ def add_overlay_to_qr(
     """
     try:
         # Load overlay image
-        overlay = Image.open(overlay_path)
+        if isinstance(overlay, bytes):
+            overlay = Image.open(io.BytesIO(overlay))
+        else:
+            overlay = overlay.copy()
         logger.debug(f"Loaded overlay image: {overlay.size}, mode: {overlay.mode}")
 
         # Convert QR code to RGB if needed
@@ -605,7 +609,7 @@ def add_overlay_to_qr(
 
     except Exception as e:
         logger.error(f"Failed to add overlay image: {e}")
-        raise ValueError(f"Could not process overlay image: {e}")
+        raise QRModelError(f"Could not process overlay image: {e}") from e
 
 
 def add_frame_to_qr(
@@ -727,26 +731,18 @@ def add_frame_to_qr(
     return framed_image
 
 
-def save_qr_code(
-    image: Image.Image,
-    output_path: Path | str,
-) -> Path:
-    """Save QR code image to file.
+def qr_image_to_png_bytes(image: Image.Image) -> bytes:
+    """Encode a QR code image as PNG.
 
     Args:
         image: PIL Image object
-        output_path: Path to save the image
 
     Returns:
-        Path to the saved file
+        PNG-encoded image bytes
     """
-    # Prepare output path with .png extension
-    output_path = prepare_output_path(output_path, ".png")
-
-    image.save(output_path, "PNG")
-    logger.info(f"Saved QR code image to: {output_path}")
-
-    return output_path
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
 
 
 def generate_qr_svg(
@@ -816,38 +812,3 @@ def generate_qr_svg(
 
     svg_parts.append("</svg>")
     return "\n".join(svg_parts)
-
-
-def save_qr_svg(
-    qr_code: qrcode.QRCode,
-    output_path: Path | str,
-    base_color: str = "white",
-    qr_color: str = "black",
-    module_style: str = "square",
-    module_size_ratio: float = 0.8,
-) -> Path:
-    """Save QR code as SVG file.
-
-    Args:
-        qr_code: The QRCode object with data
-        output_path: Path to save the SVG
-        base_color: Background color
-        qr_color: Module color
-        module_style: Style of modules
-        module_size_ratio: Size ratio for modules
-
-    Returns:
-        Path to the saved SVG file
-    """
-    # Prepare output path with .svg extension
-    output_path = prepare_output_path(output_path, ".svg")
-
-    # Generate SVG
-    svg_content = generate_qr_svg(qr_code, base_color, qr_color, module_style, module_size_ratio)
-
-    # Save to file
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(svg_content)
-
-    logger.info(f"Saved QR code SVG to: {output_path}")
-    return output_path

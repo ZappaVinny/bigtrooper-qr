@@ -26,8 +26,9 @@ The different approaches are necessary because:
 
 from __future__ import annotations
 
+import io
+import logging
 import math
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,20 +43,10 @@ try:
 except ImportError:
     HAS_LIB3MF = False
 
-from .logging_config import get_logger
-from .utils import (
-    color_to_3mf_format,
-    ensure_grayscale,
-    load_font_with_fallbacks,
-    numpy_mesh_to_trimesh,
-    parse_color,
-    prepare_output_path,
-    repair_mesh,
-    save_mesh_debug_view,
-    validate_mesh,
-)
+from .errors import QRModelError
+from .utils import color_to_3mf_format, ensure_grayscale, load_font_with_fallbacks, parse_color
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Keychain tab outline resolution: evenly spaced samples plus the two square corners
 KEYCHAIN_SEGMENTS = 32
@@ -71,6 +62,7 @@ def render_back_text_mask(
     grid_shape: tuple[int, int],
     pixel_size: float,
     text_size_mm: float = 4.0,
+    warnings: list[str] | None = None,
 ) -> np.ndarray:
     """Render text as a mask for recessing into the bottom face of the model.
 
@@ -82,16 +74,17 @@ def render_back_text_mask(
         grid_shape: (rows, cols) of the height map the mask must match
         pixel_size: Size of each height map pixel in mm
         text_size_mm: Target height of capital letters in mm
+        warnings: Optional list that receives a message if the text had to shrink
 
     Returns:
         Boolean array with the height map's shape, True where text is recessed
 
     Raises:
-        ValueError: If the text is empty or cannot fit on the base
+        QRModelError: If the text is empty or cannot fit on the base
     """
     lines = [line.strip() for line in text.replace("\\n", "\n").split("\n") if line.strip()]
     if not lines:
-        raise ValueError("Back text is empty")
+        raise QRModelError("Back text is empty")
     joined = "\n".join(lines)
 
     rows, cols = grid_shape
@@ -116,11 +109,11 @@ def render_back_text_mask(
         if text_width <= max_width and text_height <= max_height:
             break
         if font_size <= 4:
-            raise ValueError(f"Back text '{joined}' does not fit on the base. Use shorter text or a larger base.")
+            raise QRModelError(f"Back text '{joined}' does not fit on the base. Use shorter text or a larger base.")
         font_size = max(4, int(font_size * 0.9))
 
-    if font_size < requested_size:
-        logger.warning(
+    if font_size < requested_size and warnings is not None:
+        warnings.append(
             f"Back text shrunk to fit: letters are {font_size * cap_ratio * pixel_size:.1f}mm tall "
             f"instead of {text_size_mm:.1f}mm"
         )
@@ -301,8 +294,6 @@ def create_stl_from_heightmap(
     pixel_size: float = 1.0,
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
-    validate_and_repair: bool = True,
-    debug_path: Path | str | None = None,
     bottom_map: np.ndarray | None = None,
 ) -> Any:
     """Create an STL mesh from a height map.
@@ -312,8 +303,6 @@ def create_stl_from_heightmap(
         pixel_size: Size of each pixel in mm
         mount_type: Type of mounting feature to add
         hole_diameter: Diameter of mounting holes in mm
-        validate_and_repair: If True, validate and repair the mesh
-        debug_path: If provided, save debug visualization to this path
         bottom_map: Optional 2D array of bottom face heights, same shape as height_map.
             Values above 0 are recessed into the bottom (used for back text). The outer
             border must stay at 0.
@@ -396,14 +385,14 @@ def create_stl_from_heightmap(
 
                     # Two triangles forming a vertical rectangle
                     if curr_height > right_height:
-                        # Current is higher, normal points left
+                        # Current is higher, normal points right (toward the lower neighbor)
                         stl_mesh.vectors[face_idx] = np.array([[x1, y0, min_h], [x1, y1, min_h], [x1, y0, max_h]])
                         face_idx += 1
 
                         stl_mesh.vectors[face_idx] = np.array([[x1, y1, min_h], [x1, y1, max_h], [x1, y0, max_h]])
                         face_idx += 1
                     else:
-                        # Right is higher, normal points right
+                        # Right is higher, normal points left (toward the lower neighbor)
                         stl_mesh.vectors[face_idx] = np.array([[x1, y0, min_h], [x1, y0, max_h], [x1, y1, min_h]])
                         face_idx += 1
 
@@ -421,18 +410,18 @@ def create_stl_from_heightmap(
 
                     # Two triangles forming a vertical rectangle
                     if curr_height > bottom_height:
-                        # Current is higher, normal points up
-                        stl_mesh.vectors[face_idx] = np.array([[x0, y1, min_h], [x1, y1, min_h], [x0, y1, max_h]])
-                        face_idx += 1
-
-                        stl_mesh.vectors[face_idx] = np.array([[x1, y1, min_h], [x1, y1, max_h], [x0, y1, max_h]])
-                        face_idx += 1
-                    else:
-                        # Bottom is higher, normal points down
+                        # Current is higher, normal points toward +Y (the lower neighbor)
                         stl_mesh.vectors[face_idx] = np.array([[x0, y1, min_h], [x0, y1, max_h], [x1, y1, min_h]])
                         face_idx += 1
 
                         stl_mesh.vectors[face_idx] = np.array([[x0, y1, max_h], [x1, y1, max_h], [x1, y1, min_h]])
+                        face_idx += 1
+                    else:
+                        # Next row is higher, normal points toward -Y (the lower current pixel)
+                        stl_mesh.vectors[face_idx] = np.array([[x0, y1, min_h], [x1, y1, min_h], [x0, y1, max_h]])
+                        face_idx += 1
+
+                        stl_mesh.vectors[face_idx] = np.array([[x1, y1, min_h], [x1, y1, max_h], [x0, y1, max_h]])
                         face_idx += 1
 
     # Create outer walls
@@ -484,11 +473,11 @@ def create_stl_from_heightmap(
         face_idx += 1
 
     if bottom_map is None:
-        # Bottom face - solid base covering entire area
-        stl_mesh.vectors[face_idx] = np.array([[0, 0, 0], [total_width, 0, 0], [0, total_height, 0]])
+        # Bottom face - solid base covering entire area, facing down
+        stl_mesh.vectors[face_idx] = np.array([[0, 0, 0], [0, total_height, 0], [total_width, 0, 0]])
         face_idx += 1
         stl_mesh.vectors[face_idx] = np.array(
-            [[total_width, 0, 0], [total_width, total_height, 0], [0, total_height, 0]]
+            [[total_width, 0, 0], [0, total_height, 0], [total_width, total_height, 0]]
         )
         face_idx += 1
     else:
@@ -511,49 +500,6 @@ def create_stl_from_heightmap(
     stl_mesh.update_normals()
 
     logger.info(f"Created STL mesh with {face_idx} faces")
-
-    # Validate and repair if requested
-    if validate_and_repair:
-        logger.debug("Validating mesh...")
-
-        # Convert numpy-stl mesh to trimesh for validation
-        vertices = stl_mesh.vectors.reshape(-1, 3)
-        faces = np.arange(len(vertices)).reshape(-1, 3)
-        trimesh_obj = numpy_mesh_to_trimesh(vertices, faces)
-
-        # Validate mesh
-        validation_results = validate_mesh(trimesh_obj, verbose=False)
-
-        if not validation_results["is_watertight"] or validation_results["duplicate_faces"] > 0:
-            logger.warning(
-                f"Mesh issues detected - Watertight: {validation_results['is_watertight']}, "
-                f"Duplicate faces: {validation_results['duplicate_faces']}, "
-                f"Non-manifold edges: {validation_results['non_manifold_edges']}"
-            )
-
-            # Repair the mesh
-            logger.info("Repairing mesh...")
-            repaired_mesh = repair_mesh(trimesh_obj, verbose=True)
-
-            # Convert back to numpy-stl format
-            repaired_vertices = repaired_mesh.vertices[repaired_mesh.faces].reshape(-1, 3, 3)
-            stl_mesh = mesh.Mesh(np.zeros(len(repaired_vertices), dtype=mesh.Mesh.dtype))
-            stl_mesh.vectors = repaired_vertices
-            stl_mesh.update_normals()
-
-            # Re-validate
-            final_validation = validate_mesh(repaired_mesh, verbose=False)
-            logger.info(
-                f"Repair complete - Watertight: {final_validation['is_watertight']}, "
-                f"Faces: {final_validation['face_count']}"
-            )
-        else:
-            logger.debug("Mesh validation passed")
-
-        # Save debug view if requested
-        if debug_path:
-            logger.info(f"Saving debug view to {debug_path}")
-            save_mesh_debug_view(trimesh_obj, debug_path)
 
     return stl_mesh
 
@@ -1131,7 +1077,6 @@ def add_keychain_mount_3mf(
 
 def convert_qr_to_stl(
     qr_image: Image.Image,
-    output_path: Path | str,
     base_size_mm: tuple[float, float] = (50.0, 50.0),
     base_height_mm: float = 2.0,
     qr_height_mm: float = 2.0,
@@ -1141,18 +1086,18 @@ def convert_qr_to_stl(
     has_frame: bool = False,
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
-    debug: bool = False,
     back_text: str | None = None,
     back_text_size_mm: float = 4.0,
     back_text_depth_mm: float = 0.6,
-) -> Path:
-    """Convert a QR code image to an STL file.
+    warnings: list[str] | None = None,
+) -> bytes:
+    """Convert a QR code image to a binary STL model.
 
     This function uses an optimized surface-based approach for STL generation:
     - Creates a complete top surface mesh (2 triangles per pixel)
     - Adds internal walls between pixels of different heights
     - Includes outer walls and a solid bottom face
-    - Results in efficient, watertight meshes suitable for 3D printing
+    - Results in efficient meshes suitable for 3D printing
 
     The STL format contains only geometry data (no color information) and is
     optimized for single-material 3D printing. The internal walls ensure proper
@@ -1160,7 +1105,6 @@ def convert_qr_to_stl(
 
     Args:
         qr_image: PIL Image of the QR code
-        output_path: Path to save the STL file
         base_size_mm: Size of the base in mm (width, height)
         base_height_mm: Height of the base layer in mm
         qr_height_mm: Additional height for QR code modules in mm
@@ -1168,22 +1112,19 @@ def convert_qr_to_stl(
         multi_layer: If True, create multiple distinct layer heights
         layer_heights: List of layer heights [base, qr, frame] in mm
         has_frame: If True, indicates the image has a frame to be rendered at a different height
-        mount_type: Type of mounting feature ('keychain' or 'holes')
-        hole_diameter: Diameter of mounting holes in mm
-        debug: If True, enable mesh validation and save debug visualization
+        mount_type: Type of mounting feature ('keychain' or None)
+        hole_diameter: Diameter of the keychain hole in mm
         back_text: Optional text recessed (mirrored) into the bottom face
         back_text_size_mm: Height of capital letters in the back text in mm
         back_text_depth_mm: How deep the back text is recessed in mm
+        warnings: Optional list that receives non-fatal messages (e.g. back text shrunk)
 
     Returns:
-        Path to the saved STL file
+        Binary STL file contents
 
     Raises:
-        ValueError: If the back text is too deep for the base or does not fit
+        QRModelError: If the back text is too deep for the base or does not fit
     """
-    # Prepare output path with .stl extension
-    output_path = prepare_output_path(output_path, ".stl")
-
     # Convert image to height map
     if multi_layer and layer_heights:
         height_map = image_to_multilayer_3d_array(
@@ -1218,21 +1159,16 @@ def convert_qr_to_stl(
 
     logger.debug(f"Image size: {img_width}x{img_height}, pixel size: {pixel_size:.3f}mm")
 
-    # Prepare debug path if debug mode is enabled
-    debug_path = None
-    if debug:
-        debug_path = output_path.with_suffix(".debug.png")
-
     # Recess back text into the bottom face, keeping at least 0.4mm of material above it
     bottom_map = None
     if back_text:
         thinnest = float(np.min(height_map))
         if back_text_depth_mm > thinnest - 0.4:
-            raise ValueError(
+            raise QRModelError(
                 f"Back text depth {back_text_depth_mm}mm is too deep for a {thinnest}mm base. "
                 f"Use a depth of at most {thinnest - 0.4:.1f}mm or a thicker base."
             )
-        text_mask = render_back_text_mask(back_text, height_map.shape, pixel_size, back_text_size_mm)
+        text_mask = render_back_text_mask(back_text, height_map.shape, pixel_size, back_text_size_mm, warnings)
         bottom_map = np.where(text_mask, back_text_depth_mm, 0.0)
 
     # Create STL mesh
@@ -1241,20 +1177,21 @@ def convert_qr_to_stl(
         pixel_size=pixel_size,
         mount_type=mount_type,
         hole_diameter=hole_diameter,
-        validate_and_repair=True,
-        debug_path=debug_path,
         bottom_map=bottom_map,
     )
 
-    # Save STL file
-    stl_mesh.save(str(output_path))
+    # Write binary STL directly (80-byte header, triangle count, 50-byte records). numpy-stl's
+    # own writer embeds a timestamp in the header, so identical options would differ byte-wise.
+    buffer = io.BytesIO()
+    buffer.write(b"bigtrooper_qr".ljust(80, b" "))
+    buffer.write(np.array([len(stl_mesh.data)], dtype="<u4").tobytes())
+    buffer.write(stl_mesh.data.astype(stl_mesh.data.dtype.newbyteorder("<")).tobytes())
 
     if multi_layer and layer_heights:
         total_height = max(layer_heights)
     else:
         total_height = base_height_mm + qr_height_mm
 
-    logger.info(f"Saved STL file to: {output_path}")
     logger.info(f"Model dimensions: {base_size_mm[0]:.1f} x {base_size_mm[1]:.1f} x {total_height:.1f} mm")
 
     if multi_layer and layer_heights:
@@ -1266,12 +1203,11 @@ def convert_qr_to_stl(
     if back_text:
         logger.info(f"Recessed back text {back_text_depth_mm:.1f}mm into the bottom face")
 
-    return output_path
+    return buffer.getvalue()
 
 
 def convert_qr_to_3mf(
     qr_image: Image.Image,
-    output_path: Path | str,
     base_size_mm: tuple[float, float] = (50.0, 50.0),
     base_height_mm: float = 2.0,
     qr_height_mm: float = 2.0,
@@ -1281,8 +1217,8 @@ def convert_qr_to_3mf(
     separate_components: bool = False,
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
-) -> Path:
-    """Convert a QR code image to a 3MF file with color support using lib3mf.
+) -> bytes:
+    """Convert a QR code image to a 3MF model with color support using lib3mf.
 
     This function uses a complete 3D object approach for 3MF generation:
     - Each raised QR module is created as a complete 3D box (all 6 faces)
@@ -1302,7 +1238,6 @@ def convert_qr_to_3mf(
 
     Args:
         qr_image: PIL Image of the QR code
-        output_path: Path to save the 3MF file
         base_size_mm: Size of the base in mm (width, height)
         base_height_mm: Height of the base layer in mm
         qr_height_mm: Additional height for QR code modules in mm
@@ -1310,17 +1245,14 @@ def convert_qr_to_3mf(
         base_color: Color name or hex code for the base/background
         qr_color: Color name or hex code for the QR modules
         separate_components: If True, create separate objects for each color
-        mount_type: Type of mounting feature ('keychain' or 'holes')
-        hole_diameter: Diameter of mounting holes in mm
+        mount_type: Type of mounting feature ('keychain' or None)
+        hole_diameter: Diameter of the keychain hole in mm
 
     Returns:
-        Path to the saved 3MF file
+        3MF file contents
     """
     if not HAS_LIB3MF:
         raise ImportError("lib3mf is required for colored 3MF export. Install with: pip install lib3mf")
-
-    # Prepare output path with .3mf extension
-    output_path = prepare_output_path(output_path, ".3mf")
 
     # Parse colors to RGB
     base_rgb = parse_color(base_color, "white")
@@ -1555,16 +1487,15 @@ def convert_qr_to_3mf(
         # Add single build item
         model.AddBuildItem(mesh_object, wrapper.GetIdentityTransform())  # type: ignore[attr-defined]
 
-    # Write to file
+    # Serialize to memory
     writer = model.QueryWriter("3mf")  # type: ignore[attr-defined]
-    writer.WriteToFile(str(output_path))
+    model_bytes = bytes(writer.WriteToBuffer())
 
     total_height = base_height_mm + qr_height_mm
-    logger.info(f"Saved 3MF file to: {output_path}")
     logger.info(f"Model dimensions: {base_size_mm[0]:.1f} x {base_size_mm[1]:.1f} x {total_height:.1f} mm")
     logger.info(f"Colors: base={base_color}, QR={qr_color}")
 
     if mount_type:
         logger.info(f"Added {mount_type} mount with {hole_diameter:.1f}mm hole diameter")
 
-    return output_path
+    return model_bytes

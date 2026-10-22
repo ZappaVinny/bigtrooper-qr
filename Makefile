@@ -1,6 +1,6 @@
 ###############################################################################
 # Common make values.
-lib    := par_qr_3d
+lib    := bigtrooper_qr
 run    := uv run
 python := $(run) python
 pyright := $(run) pyright
@@ -12,14 +12,10 @@ build  := uv build
 #export UV_LINK_MODE=copy
 export PIPENV_VERBOSITY=-1
 ##############################################################################
-# Run the app.
-.PHONY: run
-run:		# Run app
-	$(run) $(lib)
-
-.PHONY: app_help
-app_help:		# Show app help
-	$(run) $(lib)  --help
+# Run the example.
+.PHONY: example
+example:		# Generate the example collar tag into ./output
+	$(python) examples/make_tag.py
 
 ##############################################################################
 .PHONY: uv-lock
@@ -56,15 +52,15 @@ shell:			# Start shell inside of .venv
 
 .PHONY: format
 format:                         # Reformat the code with ruff.
-	$(ruff) format src/$(lib)
+	$(ruff) format src/$(lib) tests examples
 
 .PHONY: lint
 lint:                           # Run ruff lint over the library
-	$(ruff) check src/$(lib) --fix
+	$(ruff) check src/$(lib) tests examples --fix
 
 .PHONY: lint-unsafe
 lint-unsafe:                           # Run ruff lint over the library
-	$(ruff) check src/$(lib) --fix --unsafe-fixes
+	$(ruff) check src/$(lib) tests examples --fix --unsafe-fixes
 
 .PHONY: typecheck
 typecheck:			# Perform static type checks with pyright
@@ -73,6 +69,10 @@ typecheck:			# Perform static type checks with pyright
 .PHONY: typecheck-stats
 typecheck-stats:			# Perform static type checks with pyright and print stats
 	$(pyright) --stats
+
+.PHONY: test
+test:				# Run the test suite
+	$(run) pytest
 
 .PHONY: checkall
 checkall: format lint typecheck 	        # Check all the things
@@ -105,14 +105,6 @@ publish: package		# Upload to pypi
 
 ##############################################################################
 # Utility.
-
-.PHONY: profile
-profile:
-	$(run) scalene -m $(lib)
-
-.PHONY: profile2
-profile2:			# Profile app with pyinstrument and generate report
-	$(run) pyinstrument -r json -o profile_report.json -m $(lib)
 
 .PHONY: get-venv-name
 get-venv-name:		# get venv python location
