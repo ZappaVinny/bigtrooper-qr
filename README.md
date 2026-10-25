@@ -26,8 +26,30 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-uvicorn app.main:app --reload        # service on http://127.0.0.1:8000 (GET / returns {"status": "ok"})
+uvicorn app.main:app --reload        # service on http://127.0.0.1:8000 (GET /up returns {"status": "ok"})
 ```
+
+## Service API
+
+| Method | Path | Body | Success |
+|---|---|---|---|
+| GET | `/up` | – | `200 {"status": "ok"}` |
+| POST | `/` | `{"link": "https://…/<code>", "type": "pet"}` | `200 {"models": [...], "warnings": [...]}` |
+
+```json
+{
+  "models": [
+    {"variant": "plain", "content_type": "model/stl", "extension": "stl", "data": "<base64>"},
+    {"variant": "color", "content_type": "model/3mf", "extension": "3mf", "data": "<base64>"}
+  ],
+  "warnings": []
+}
+```
+
+- `link` is encoded as-is; the caller builds the full URL.
+- `type` picks a preset in `TAG_PRESETS` (`app/main.py`), which generates one model per variant.
+- Responses are gzipped when the client accepts it (~25 MB raw, ~6.6 MB gzipped for `pet`).
+- `422` for an unknown `type` or options the library rejects.
 
 Use the library directly from the repo root:
 
