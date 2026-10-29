@@ -50,11 +50,68 @@ logger = logging.getLogger(__name__)
 
 # Keychain tab outline resolution: evenly spaced samples plus the two square corners
 KEYCHAIN_SEGMENTS = 32
-# Top, bottom, outer wall and hole wall each use 2 triangles per outline point
-KEYCHAIN_TRIANGLE_COUNT = 8 * (KEYCHAIN_SEGMENTS + 2)
+
+# Arch mount resolution: segments along the half-ellipse from one leg to the other
+ARCH_SEGMENTS = 48
+
+# 3D-printed mounts are a fixed thickness, whatever the base thickness
+MOUNT_THICKNESS_MM = 2.0
 
 # Minimum clearance between back text and the edge of the base
 BACK_TEXT_MARGIN_MM = 1.5
+
+# Outline points per rounded base corner in 3MF output
+ROUNDED_CORNER_SEGMENTS = 16
+
+
+def rounded_rect_mask(shape: tuple[int, int], pixel_size: float, radius: float, round_top: bool = True) -> np.ndarray:
+    """Mark the pixels whose centers fall inside a rectangle with rounded corners.
+
+    Args:
+        shape: (rows, columns) of the height map
+        pixel_size: Size of each pixel in mm
+        radius: Corner radius in mm
+        round_top: If False, the two corners at the top (high y, where mounts attach) stay square
+
+    Returns:
+        Boolean array of the given shape, True for pixels inside the outline
+    """
+    rows, cols = shape
+    xs = (np.arange(cols) + 0.5) * pixel_size
+    ys = (np.arange(rows) + 0.5) * pixel_size
+    # Distance from each pixel center to the nearest point of the inner rectangle
+    # (the outline shrunk by the radius); inside the outline means within the radius
+    dx = xs - np.clip(xs, radius, cols * pixel_size - radius)
+    dy = ys - np.clip(ys, radius, rows * pixel_size - (radius if round_top else 0.0))
+    return dx[np.newaxis, :] ** 2 + dy[:, np.newaxis] ** 2 <= radius**2
+
+
+def rounded_rect_outline(
+    width: float, depth: float, radius: float, round_top: bool = True
+) -> list[tuple[float, float]]:
+    """Outline of a rectangle with rounded corners, counter-clockwise from the bottom-right corner.
+
+    Args:
+        width: Width of the rectangle in mm (x)
+        depth: Depth of the rectangle in mm (y)
+        radius: Corner radius in mm; 0 gives the four plain corners
+        round_top: If False, the two corners at the top (high y, where mounts attach) stay square
+
+    Returns:
+        List of (x, y) outline points
+    """
+    centers = [(width - radius, radius), (width - radius, depth - radius), (radius, depth - radius), (radius, radius)]
+    points = []
+    for corner, (cx, cy) in enumerate(centers):
+        is_top = corner in (1, 2)
+        if radius <= 0 or (is_top and not round_top):
+            points.append(((width if corner < 2 else 0.0), (depth if is_top else 0.0)))
+            continue
+        start = -np.pi / 2 + corner * np.pi / 2
+        for i in range(ROUNDED_CORNER_SEGMENTS + 1):
+            angle = start + (np.pi / 2) * i / ROUNDED_CORNER_SEGMENTS
+            points.append((cx + radius * float(np.cos(angle)), cy + radius * float(np.sin(angle))))
+    return points
 
 
 def render_back_text_mask(
@@ -292,57 +349,68 @@ def image_to_multilayer_3d_array(
 def create_stl_from_heightmap(
     height_map: np.ndarray,
     pixel_size: float = 1.0,
-    mount_type: str | None = None,
-    hole_diameter: float = 4.0,
+    mount_geometry: tuple[list[list[float]], list[tuple[int, int, int]]] | None = None,
     bottom_map: np.ndarray | None = None,
+    mask: np.ndarray | None = None,
 ) -> Any:
     """Create an STL mesh from a height map.
 
     Args:
         height_map: 2D array of heights
         pixel_size: Size of each pixel in mm
-        mount_type: Type of mounting feature to add
-        hole_diameter: Diameter of mounting holes in mm
+        mount_geometry: Optional (vertices, triangles) of a mount to add, from generate_mount_geometry
         bottom_map: Optional 2D array of bottom face heights, same shape as height_map.
-            Values above 0 are recessed into the bottom (used for back text). The outer
-            border must stay at 0.
+            Values above 0 are recessed into the bottom (used for back text).
+        mask: Optional boolean array, same shape as height_map. Only True pixels are solid,
+            and outer walls follow its edge (used for rounded corners). Defaults to all True.
 
     Returns:
         STL Mesh object with optional mounting features
     """
     height, width = height_map.shape
 
-    # We need to count faces more carefully
-    # Top surface: 2 triangles per pixel
-    num_faces = height * width * 2
+    flat_bottom = bottom_map is None and mask is None
+    if mask is None:
+        mask = np.ones(height_map.shape, dtype=bool)
+    bottom_map = np.zeros_like(height_map) if bottom_map is None else np.where(mask, bottom_map, 0.0)
 
-    if bottom_map is None:
+    # Neighbors that are both solid, and solid pixel sides that face empty space
+    # (the grid border counts as empty)
+    pair_x = mask[:, 1:] & mask[:, :-1]
+    pair_y = mask[1:, :] & mask[:-1, :]
+    padded = np.pad(mask, 1, constant_values=False)
+    open_front = mask & ~padded[:-2, 1:-1]  # y - 1
+    open_back = mask & ~padded[2:, 1:-1]  # y + 1
+    open_left = mask & ~padded[1:-1, :-2]  # x - 1
+    open_right = mask & ~padded[1:-1, 2:]  # x + 1
+
+    # Top surface: 2 triangles per solid pixel
+    num_faces = 2 * int(np.count_nonzero(mask))
+
+    if flat_bottom:
         # Bottom surface: 2 triangles for entire base
         num_faces += 2
     else:
-        # Bottom surface: 2 triangles per pixel plus walls at each recess edge
-        num_faces += height * width * 2
-        num_faces += 2 * int(np.count_nonzero(bottom_map[:, 1:] != bottom_map[:, :-1]))
-        num_faces += 2 * int(np.count_nonzero(bottom_map[1:, :] != bottom_map[:-1, :]))
+        # Bottom surface: 2 triangles per solid pixel plus walls at each recess edge
+        num_faces += 2 * int(np.count_nonzero(mask))
+        num_faces += 2 * int(np.count_nonzero(pair_x & (bottom_map[:, 1:] != bottom_map[:, :-1])))
+        num_faces += 2 * int(np.count_nonzero(pair_y & (bottom_map[1:, :] != bottom_map[:-1, :])))
 
-    # Outer walls: 2 triangles per edge pixel
-    num_faces += 2 * (2 * height + 2 * width)
+    # Outer walls: 2 triangles per open pixel side
+    num_faces += 2 * int(
+        np.count_nonzero(open_front)
+        + np.count_nonzero(open_back)
+        + np.count_nonzero(open_left)
+        + np.count_nonzero(open_right)
+    )
 
-    # Internal walls: We need walls at every height transition
-    # Count transitions between adjacent pixels
-    for y in range(height):
-        for x in range(width):
-            curr_height = height_map[y, x]
-            # Check right neighbor
-            if x < width - 1 and height_map[y, x + 1] != curr_height:
-                num_faces += 2  # Two triangles for vertical wall
-            # Check bottom neighbor
-            if y < height - 1 and height_map[y + 1, x] != curr_height:
-                num_faces += 2  # Two triangles for vertical wall
+    # Internal walls: 2 triangles at every height transition between solid pixels
+    num_faces += 2 * int(np.count_nonzero(pair_x & (height_map[:, 1:] != height_map[:, :-1])))
+    num_faces += 2 * int(np.count_nonzero(pair_y & (height_map[1:, :] != height_map[:-1, :])))
 
     # Add faces for mounting features
-    if mount_type == "keychain":
-        num_faces += KEYCHAIN_TRIANGLE_COUNT
+    if mount_geometry is not None:
+        num_faces += len(mount_geometry[1])
 
     # Create mesh
     stl_mesh: Any = mesh.Mesh(np.zeros(num_faces, dtype=mesh.Mesh.dtype))
@@ -352,6 +420,8 @@ def create_stl_from_heightmap(
     # Create top surface
     for y in range(height):
         for x in range(width):
+            if not mask[y, x]:
+                continue
             # Get the four corners of this pixel
             x0, y0 = x * pixel_size, y * pixel_size
             x1, y1 = (x + 1) * pixel_size, (y + 1) * pixel_size
@@ -370,12 +440,14 @@ def create_stl_from_heightmap(
     # Create internal walls at height transitions
     for y in range(height):
         for x in range(width):
+            if not mask[y, x]:
+                continue
             x0, y0 = x * pixel_size, y * pixel_size
             x1, y1 = (x + 1) * pixel_size, (y + 1) * pixel_size
             curr_height = height_map[y, x]
 
             # Check right neighbor - create vertical wall if heights differ
-            if x < width - 1:
+            if x < width - 1 and mask[y, x + 1]:
                 right_height = height_map[y, x + 1]
                 if curr_height != right_height:
                     # Create wall between current and right pixel
@@ -400,7 +472,7 @@ def create_stl_from_heightmap(
                         face_idx += 1
 
             # Check bottom neighbor - create vertical wall if heights differ
-            if y < height - 1:
+            if y < height - 1 and mask[y + 1, x]:
                 bottom_height = height_map[y + 1, x]
                 if curr_height != bottom_height:
                     # Create wall between current and bottom pixel
@@ -424,56 +496,39 @@ def create_stl_from_heightmap(
                         stl_mesh.vectors[face_idx] = np.array([[x1, y1, min_h], [x1, y1, max_h], [x0, y1, max_h]])
                         face_idx += 1
 
-    # Create outer walls
-    total_width = width * pixel_size
-    total_height = height * pixel_size
+    # Create outer walls on every solid pixel side that faces empty space, from the
+    # pixel's bottom face up to its top face, with normals pointing outward
 
-    # Front side (y=0)
-    for x in range(width):
-        x0, x1 = x * pixel_size, (x + 1) * pixel_size
-        h = height_map[0, x]
-
-        # Two triangles
-        stl_mesh.vectors[face_idx] = np.array([[x0, 0, 0], [x1, 0, 0], [x0, 0, h]])
-        face_idx += 1
-        stl_mesh.vectors[face_idx] = np.array([[x1, 0, 0], [x1, 0, h], [x0, 0, h]])
-        face_idx += 1
-
-    # Back side (y=max)
-    for x in range(width):
-        x0, x1 = x * pixel_size, (x + 1) * pixel_size
-        h = height_map[height - 1, x]
-
-        # Two triangles
-        stl_mesh.vectors[face_idx] = np.array([[x0, total_height, h], [x1, total_height, h], [x0, total_height, 0]])
-        face_idx += 1
-        stl_mesh.vectors[face_idx] = np.array([[x1, total_height, h], [x1, total_height, 0], [x0, total_height, 0]])
-        face_idx += 1
-
-    # Left side (x=0)
     for y in range(height):
-        y0, y1 = y * pixel_size, (y + 1) * pixel_size
-        h = height_map[y, 0]
+        for x in range(width):
+            if not mask[y, x]:
+                continue
+            x0, y0 = x * pixel_size, y * pixel_size
+            x1, y1 = (x + 1) * pixel_size, (y + 1) * pixel_size
+            h = height_map[y, x]
+            b = bottom_map[y, x]
 
-        # Two triangles
-        stl_mesh.vectors[face_idx] = np.array([[0, y0, h], [0, y1, h], [0, y0, 0]])
-        face_idx += 1
-        stl_mesh.vectors[face_idx] = np.array([[0, y1, h], [0, y1, 0], [0, y0, 0]])
-        face_idx += 1
+            if open_front[y, x]:
+                stl_mesh.vectors[face_idx] = np.array([[x0, y0, b], [x1, y0, b], [x0, y0, h]])
+                stl_mesh.vectors[face_idx + 1] = np.array([[x1, y0, b], [x1, y0, h], [x0, y0, h]])
+                face_idx += 2
+            if open_back[y, x]:
+                stl_mesh.vectors[face_idx] = np.array([[x0, y1, h], [x1, y1, h], [x0, y1, b]])
+                stl_mesh.vectors[face_idx + 1] = np.array([[x1, y1, h], [x1, y1, b], [x0, y1, b]])
+                face_idx += 2
+            if open_left[y, x]:
+                stl_mesh.vectors[face_idx] = np.array([[x0, y0, h], [x0, y1, h], [x0, y0, b]])
+                stl_mesh.vectors[face_idx + 1] = np.array([[x0, y1, h], [x0, y1, b], [x0, y0, b]])
+                face_idx += 2
+            if open_right[y, x]:
+                stl_mesh.vectors[face_idx] = np.array([[x1, y0, b], [x1, y1, b], [x1, y0, h]])
+                stl_mesh.vectors[face_idx + 1] = np.array([[x1, y1, b], [x1, y1, h], [x1, y0, h]])
+                face_idx += 2
 
-    # Right side (x=max)
-    for y in range(height):
-        y0, y1 = y * pixel_size, (y + 1) * pixel_size
-        h = height_map[y, width - 1]
-
-        # Two triangles
-        stl_mesh.vectors[face_idx] = np.array([[total_width, y0, 0], [total_width, y1, 0], [total_width, y0, h]])
-        face_idx += 1
-        stl_mesh.vectors[face_idx] = np.array([[total_width, y1, 0], [total_width, y1, h], [total_width, y0, h]])
-        face_idx += 1
-
-    if bottom_map is None:
+    if flat_bottom:
         # Bottom face - solid base covering entire area, facing down
+        total_width = width * pixel_size
+        total_height = height * pixel_size
         stl_mesh.vectors[face_idx] = np.array([[0, 0, 0], [0, total_height, 0], [total_width, 0, 0]])
         face_idx += 1
         stl_mesh.vectors[face_idx] = np.array(
@@ -481,20 +536,14 @@ def create_stl_from_heightmap(
         )
         face_idx += 1
     else:
-        face_idx = add_recessed_bottom(stl_mesh, face_idx, bottom_map, pixel_size)
+        face_idx = add_recessed_bottom(stl_mesh, face_idx, bottom_map, pixel_size, mask)
 
     # Add mounting features if requested
-    if mount_type == "keychain":
-        # Get the maximum height of the model
-        max_height = np.max(height_map)
-        face_idx = add_keychain_mount(
-            stl_mesh,
-            face_idx,
-            total_width,
-            total_height,
-            max_height,
-            hole_diameter,
-        )
+    if mount_geometry is not None:
+        vertices, triangles = mount_geometry
+        for v0, v1, v2 in triangles:
+            stl_mesh.vectors[face_idx] = np.array([vertices[v0], vertices[v1], vertices[v2]])
+            face_idx += 1
 
     # Update normals
     stl_mesh.update_normals()
@@ -504,7 +553,9 @@ def create_stl_from_heightmap(
     return stl_mesh
 
 
-def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pixel_size: float) -> int:
+def add_recessed_bottom(
+    stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pixel_size: float, mask: np.ndarray
+) -> int:
     """Add a bottom surface with recesses (such as back text) to an STL mesh.
 
     Args:
@@ -512,6 +563,7 @@ def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pi
         face_idx: Current face index to start adding faces
         bottom_map: 2D array of bottom face heights; 0 is flush with the print bed
         pixel_size: Size of each pixel in mm
+        mask: Boolean array of solid pixels; empty pixels get no bottom face
 
     Returns:
         Updated face index after adding bottom faces
@@ -520,6 +572,8 @@ def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pi
 
     for y in range(height):
         for x in range(width):
+            if not mask[y, x]:
+                continue
             x0, y0 = x * pixel_size, y * pixel_size
             x1, y1 = (x + 1) * pixel_size, (y + 1) * pixel_size
             b = bottom_map[y, x]
@@ -531,7 +585,7 @@ def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pi
             face_idx += 1
 
             # Wall to the right neighbor, facing into whichever side is recessed deeper
-            if x < width - 1 and bottom_map[y, x + 1] != b:
+            if x < width - 1 and mask[y, x + 1] and bottom_map[y, x + 1] != b:
                 right_b = bottom_map[y, x + 1]
                 lo, hi = min(b, right_b), max(b, right_b)
                 if b > right_b:
@@ -543,7 +597,7 @@ def add_recessed_bottom(stl_mesh: Any, face_idx: int, bottom_map: np.ndarray, pi
                 face_idx += 2
 
             # Wall to the next row, facing into whichever side is recessed deeper
-            if y < height - 1 and bottom_map[y + 1, x] != b:
+            if y < height - 1 and mask[y + 1, x] and bottom_map[y + 1, x] != b:
                 next_b = bottom_map[y + 1, x]
                 lo, hi = min(b, next_b), max(b, next_b)
                 if b > next_b:
@@ -885,8 +939,7 @@ def generate_keychain_mount_geometry(
     base_depth: float,
     base_height: float,
     hole_diameter: float = 4.0,
-    tab_width: float = 15.0,
-    tab_height: float = 10.0,
+    hole_band: float = 2.5,
     tab_thickness: float = 2.0,
 ) -> tuple[list[list[float]], list[tuple[int, int, int]]]:
     """Generate vertex and triangle data for a keychain mounting tab.
@@ -896,8 +949,7 @@ def generate_keychain_mount_geometry(
         base_depth: Depth of the QR code base in mm
         base_height: Height of the base in mm
         hole_diameter: Diameter of the keychain hole in mm
-        tab_width: Width of the mounting tab in mm
-        tab_height: Height of the mounting tab in mm
+        hole_band: Width of the plastic ring around the hole, including toward the base, in mm
         tab_thickness: Thickness of the tab in mm
 
     Returns:
@@ -906,13 +958,13 @@ def generate_keychain_mount_geometry(
         - triangles is a list of (v0, v1, v2) vertex indices
     """
     # The tab is a "D" shape: straight sides rising from the QR base edge, closed
-    # by a semicircle concentric with the hole so the ring around it is even.
+    # by a semicircle concentric with the hole. The band between the hole and the
+    # base edge matches the ring, so the plastic is the same width all the way round.
     tab_y_start = base_depth  # Tab starts at the base edge
     hole_radius = hole_diameter / 2
-    arc_radius = max(tab_width / 2, hole_radius + 1.0)
+    arc_radius = hole_radius + hole_band
     hole_center_x = base_width / 2
-    # Place the arc top at the tab height, but keep at least 1mm between hole and base edge
-    hole_center_y = max(tab_y_start + tab_height - arc_radius, tab_y_start + hole_radius + 1.0)
+    hole_center_y = tab_y_start + hole_radius + hole_band
 
     # Sample angles around the hole center, offset by half a step so the sampled
     # angles never coincide with the two square corners added below
@@ -978,76 +1030,166 @@ def generate_keychain_mount_geometry(
     return vertices, triangles
 
 
-def add_keychain_mount(
-    stl_mesh: Any,
-    face_idx: int,
+def generate_arch_mount_geometry(
     base_width: float,
     base_depth: float,
-    base_height: float,
-    hole_diameter: float = 4.0,
-    tab_width: float = 15.0,
-    tab_height: float = 10.0,
-) -> int:
-    """Add a keychain mounting tab with hole to an STL mesh.
+    arch_band: float = 4.0,
+    arch_height: float = 12.0,
+    arch_padding: float = 2.0,
+    thickness: float = MOUNT_THICKNESS_MM,
+) -> tuple[list[list[float]], list[tuple[int, int, int]]]:
+    """Generate vertex and triangle data for an arch mount spanning the full base width.
+
+    The mount is a solid strip along the base edge (the padding) topped by a half-ellipse
+    arch. The arch's outer edges continue the base's sides, and the opening's inner edge is
+    the outer curve offset inward by the band, so the band is the same width everywhere.
 
     Args:
-        stl_mesh: The STL mesh object to add mount to
-        face_idx: Current face index to start adding faces
         base_width: Width of the QR code base in mm
-        base_depth: Depth of the QR code base in mm
-        base_height: Height of the base in mm
-        hole_diameter: Diameter of the keychain hole in mm
-        tab_width: Width of the mounting tab in mm
-        tab_height: Height of the mounting tab in mm
+        base_depth: Depth of the QR code base in mm (the mount starts at this edge)
+        arch_band: Width of the arch band in mm
+        arch_height: Total height of the mount above the base edge in mm, padding included
+        arch_padding: Height of the solid strip between the base edge and the opening in mm
+        thickness: Thickness of the mount in mm
 
     Returns:
-        Updated face index after adding mount faces
+        Tuple of (vertices, triangles) where:
+        - vertices is a list of [x, y, z] coordinates
+        - triangles is a list of (v0, v1, v2) vertex indices
     """
-    # Generate the geometry with a thinner tab (2mm thickness)
-    vertices, triangles = generate_keychain_mount_geometry(
-        base_width, base_depth, base_height, hole_diameter, tab_width, tab_height, tab_thickness=2.0
+    a = base_width / 2  # Horizontal semi-axis: the arch spans the full width
+    b = arch_height - arch_padding  # Vertical semi-axis
+    cx, cy = base_width / 2, base_depth + arch_padding
+
+    # Sample the half-ellipse counter-clockwise from the right leg (0) to the left leg (pi)
+    outer_points = []
+    inner_points = []
+    for i in range(ARCH_SEGMENTS + 1):
+        theta = np.pi * i / ARCH_SEGMENTS
+        cos_t, sin_t = float(np.cos(theta)), float(np.sin(theta))
+        ox, oy = cx + a * cos_t, cy + b * sin_t
+        # Outward normal of the ellipse at this point
+        nx, ny = cos_t / a, sin_t / b
+        length = float(np.hypot(nx, ny))
+        outer_points.append((ox, oy))
+        inner_points.append((ox - arch_band * nx / length, oy - arch_band * ny / length))
+
+    n = len(outer_points)
+    vertices: list[list[float]] = []
+    triangles: list[tuple[int, int, int]] = []
+
+    # Vertex layout: outer top, outer bottom, inner top, inner bottom, then the two
+    # base-edge corners of the padding strip (top, bottom) on each side
+    outer_top, outer_bottom, inner_top, inner_bottom = 0, n, 2 * n, 3 * n
+    for z in (thickness, 0.0):
+        vertices.extend([x, y, z] for x, y in outer_points)
+    for z in (thickness, 0.0):
+        vertices.extend([x, y, z] for x, y in inner_points)
+    right_top, right_bottom, left_top, left_bottom = 4 * n, 4 * n + 1, 4 * n + 2, 4 * n + 3
+    vertices.extend(
+        [
+            [base_width, base_depth, thickness],
+            [base_width, base_depth, 0.0],
+            [0.0, base_depth, thickness],
+            [0.0, base_depth, 0.0],
+        ]
     )
 
-    # Add triangles to STL mesh
-    for v0, v1, v2 in triangles:
-        stl_mesh.vectors[face_idx] = np.array([vertices[v0], vertices[v1], vertices[v2]])
-        face_idx += 1
+    for i in range(n - 1):
+        j = i + 1
+        # Band top (normal +Z) and bottom (normal -Z)
+        triangles.append((outer_top + i, outer_top + j, inner_top + j))
+        triangles.append((outer_top + i, inner_top + j, inner_top + i))
+        triangles.append((outer_bottom + i, inner_bottom + j, outer_bottom + j))
+        triangles.append((outer_bottom + i, inner_bottom + i, inner_bottom + j))
+        # Outer wall, normal pointing away from the arch
+        triangles.append((outer_bottom + i, outer_bottom + j, outer_top + j))
+        triangles.append((outer_bottom + i, outer_top + j, outer_top + i))
+        # Inner wall, normal pointing into the opening
+        triangles.append((inner_top + i, inner_top + j, inner_bottom + i))
+        triangles.append((inner_top + j, inner_bottom + j, inner_bottom + i))
 
-    return face_idx
+    # Padding strip: base edge -> right leg -> opening floor -> left leg, counter-clockwise
+    o_right, o_left = 0, n - 1  # Outer curve ends, at the top of the strip
+    i_right, i_left = 0, n - 1  # Inner curve ends, at the opening floor
+    for is_top in (True, False):
+        r = right_top if is_top else right_bottom
+        lft = left_top if is_top else left_bottom
+        o = outer_top if is_top else outer_bottom
+        inn = inner_top if is_top else inner_bottom
+        faces = [
+            (lft, r, inn + i_right),
+            (r, o + o_right, inn + i_right),
+            (lft, inn + i_right, inn + i_left),
+            (lft, inn + i_left, o + o_left),
+        ]
+        # Top faces wind counter-clockwise (normal +Z); bottom faces are reversed (normal -Z)
+        triangles.extend(f if is_top else (f[0], f[2], f[1]) for f in faces)
+
+    # Strip walls: base edge (normal -Y), right side (+X), left side (-X), opening floor (+Y)
+    triangles.append((left_bottom, right_bottom, right_top))
+    triangles.append((left_bottom, right_top, left_top))
+    triangles.append((right_bottom, outer_bottom + o_right, outer_top + o_right))
+    triangles.append((right_bottom, outer_top + o_right, right_top))
+    triangles.append((outer_bottom + o_left, left_bottom, left_top))
+    triangles.append((outer_bottom + o_left, left_top, outer_top + o_left))
+    triangles.append((inner_bottom + i_right, inner_bottom + i_left, inner_top + i_left))
+    triangles.append((inner_bottom + i_right, inner_top + i_left, inner_top + i_right))
+
+    return vertices, triangles
 
 
-def add_keychain_mount_3mf(
-    mesh_object: Any,
+def generate_mount_geometry(
+    mount_type: str | None,
     base_width: float,
     base_depth: float,
-    base_height: float,
-    hole_diameter: float,
+    hole_diameter: float = 4.0,
+    hole_band: float = 2.5,
+    arch_band: float = 4.0,
+    arch_height: float = 12.0,
+    arch_padding: float = 2.0,
+) -> tuple[list[list[float]], list[tuple[int, int, int]]] | None:
+    """Generate the geometry for the requested mount, attached to the top (high y) edge of the base.
+
+    Args:
+        mount_type: 'keychain', 'arch' or None
+        base_width: Width of the QR code base in mm
+        base_depth: Depth of the QR code base in mm
+        hole_diameter: Keychain hole diameter in mm
+        hole_band: Width of the plastic ring around the keychain hole in mm
+        arch_band: Width of the arch band in mm
+        arch_height: Total height of the arch mount above the base edge in mm
+        arch_padding: Height of the solid strip under the arch opening in mm
+
+    Returns:
+        (vertices, triangles), or None when no mount is requested
+    """
+    if mount_type == "keychain":
+        return generate_keychain_mount_geometry(
+            base_width, base_depth, 0.0, hole_diameter, hole_band, tab_thickness=MOUNT_THICKNESS_MM
+        )
+    if mount_type == "arch":
+        return generate_arch_mount_geometry(base_width, base_depth, arch_band, arch_height, arch_padding)
+    return None
+
+
+def add_mount_3mf(
+    mesh_object: Any,
+    mount_geometry: tuple[list[list[float]], list[tuple[int, int, int]]],
     material_group: Any | None,
     material_id: int | None,
     triangle_properties: list | None,
-    wrapper: Any,
-    tab_width: float = 15.0,
-    tab_height: float = 10.0,
 ) -> None:
-    """Add a keychain mounting tab with hole to a 3MF mesh object.
+    """Add a mount's geometry to a 3MF mesh object.
 
     Args:
         mesh_object: The 3MF mesh object to add mount to
-        base_width: Width of the QR code base in mm
-        base_depth: Depth of the QR code base in mm
-        base_height: Height of the base in mm
-        hole_diameter: Diameter of the keychain hole in mm
+        mount_geometry: (vertices, triangles) from generate_mount_geometry
         material_group: Material group for coloring (None if separate components)
         material_id: Material ID for the mount
         triangle_properties: List to append triangle properties to
-        wrapper: lib3mf wrapper instance
-        tab_width: Width of the mounting tab in mm
-        tab_height: Height of the mounting tab in mm
     """
-    # Generate the shared geometry with a thinner tab (2mm thickness)
-    vertices, triangles = generate_keychain_mount_geometry(
-        base_width, base_depth, base_height, hole_diameter, tab_width, tab_height, tab_thickness=2.0
-    )
+    vertices, triangles = mount_geometry
 
     # Add vertices to 3MF mesh and store their indices
     vertex_indices = []
@@ -1086,6 +1228,11 @@ def convert_qr_to_stl(
     has_frame: bool = False,
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
+    hole_band: float = 2.5,
+    arch_band: float = 4.0,
+    arch_height: float = 12.0,
+    arch_padding: float = 2.0,
+    corner_radius: float = 0.0,
     back_text: str | None = None,
     back_text_size_mm: float = 4.0,
     back_text_depth_mm: float = 0.6,
@@ -1112,8 +1259,14 @@ def convert_qr_to_stl(
         multi_layer: If True, create multiple distinct layer heights
         layer_heights: List of layer heights [base, qr, frame] in mm
         has_frame: If True, indicates the image has a frame to be rendered at a different height
-        mount_type: Type of mounting feature ('keychain' or None)
+        mount_type: Type of mounting feature ('keychain', 'arch' or None)
         hole_diameter: Diameter of the keychain hole in mm
+        hole_band: Width of the plastic ring around the keychain hole in mm
+        arch_band: Width of the arch band in mm
+        arch_height: Total height of the arch mount above the base edge in mm
+        arch_padding: Height of the solid strip under the arch opening in mm
+        corner_radius: Radius of the base plate's rounded corners in mm (0 for square corners).
+            With an arch mount the top corners stay square, since the arch continues the sides.
         back_text: Optional text recessed (mirrored) into the bottom face
         back_text_size_mm: Height of capital letters in the back text in mm
         back_text_depth_mm: How deep the back text is recessed in mm
@@ -1172,12 +1325,25 @@ def convert_qr_to_stl(
         bottom_map = np.where(text_mask, back_text_depth_mm, 0.0)
 
     # Create STL mesh
+    mount_geometry = generate_mount_geometry(
+        mount_type,
+        img_width * pixel_size,
+        img_height * pixel_size,
+        hole_diameter,
+        hole_band,
+        arch_band,
+        arch_height,
+        arch_padding,
+    )
+    mask = None
+    if corner_radius > 0:
+        mask = rounded_rect_mask(height_map.shape, pixel_size, corner_radius, round_top=mount_type != "arch")
     stl_mesh = create_stl_from_heightmap(
         height_map,
         pixel_size=pixel_size,
-        mount_type=mount_type,
-        hole_diameter=hole_diameter,
+        mount_geometry=mount_geometry,
         bottom_map=bottom_map,
+        mask=mask,
     )
 
     # Write binary STL directly (80-byte header, triangle count, 50-byte records). numpy-stl's
@@ -1198,7 +1364,7 @@ def convert_qr_to_stl(
         logger.info(f"Multi-layer heights: {', '.join(f'{h:.1f}mm' for h in layer_heights)}")
 
     if mount_type:
-        logger.info(f"Added {mount_type} mount with {hole_diameter:.1f}mm hole diameter")
+        logger.info(f"Added {mount_type} mount")
 
     if back_text:
         logger.info(f"Recessed back text {back_text_depth_mm:.1f}mm into the bottom face")
@@ -1217,6 +1383,11 @@ def convert_qr_to_3mf(
     separate_components: bool = False,
     mount_type: str | None = None,
     hole_diameter: float = 4.0,
+    hole_band: float = 2.5,
+    arch_band: float = 4.0,
+    arch_height: float = 12.0,
+    arch_padding: float = 2.0,
+    corner_radius: float = 0.0,
 ) -> bytes:
     """Convert a QR code image to a 3MF model with color support using lib3mf.
 
@@ -1245,8 +1416,14 @@ def convert_qr_to_3mf(
         base_color: Color name or hex code for the base/background
         qr_color: Color name or hex code for the QR modules
         separate_components: If True, create separate objects for each color
-        mount_type: Type of mounting feature ('keychain' or None)
+        mount_type: Type of mounting feature ('keychain', 'arch' or None)
         hole_diameter: Diameter of the keychain hole in mm
+        hole_band: Width of the plastic ring around the keychain hole in mm
+        arch_band: Width of the arch band in mm
+        arch_height: Total height of the arch mount above the base edge in mm
+        arch_padding: Height of the solid strip under the arch opening in mm
+        corner_radius: Radius of the base plate's rounded corners in mm (0 for square corners).
+            With an arch mount the top corners stay square, since the arch continues the sides.
 
     Returns:
         3MF file contents
@@ -1390,24 +1567,23 @@ def convert_qr_to_3mf(
                     prop.PropertyIDs[2] = qr_material_id
                     triangle_properties.append(prop)
 
-    # Add complete base plate as a box
+    # Add the base plate: its outline (square or rounded corners) extruded to the base height
     base_width = img_width * pixel_size
     base_depth = img_height * pixel_size
 
     # Choose which mesh to add base to
     base_target_mesh = base_mesh if separate_components else mesh_object
 
-    # Create 8 vertices for the base box
+    # Vertex layout: bottom center, top center, outline at z=0, outline at the base height.
+    # The outline is convex, so both caps are fans around the center.
+    outline = rounded_rect_outline(base_width, base_depth, corner_radius, round_top=mount_type != "arch")
+    n = len(outline)
     base_vertices = []
     for vx, vy, vz in [
-        (0, 0, 0),  # 0: bottom-left-bottom
-        (base_width, 0, 0),  # 1: bottom-right-bottom
-        (base_width, base_depth, 0),  # 2: top-right-bottom
-        (0, base_depth, 0),  # 3: top-left-bottom
-        (0, 0, base_height_mm),  # 4: bottom-left-top
-        (base_width, 0, base_height_mm),  # 5: bottom-right-top
-        (base_width, base_depth, base_height_mm),  # 6: top-right-top
-        (0, base_depth, base_height_mm),  # 7: top-left-top
+        (base_width / 2, base_depth / 2, 0.0),
+        (base_width / 2, base_depth / 2, base_height_mm),
+        *[(x, y, 0.0) for x, y in outline],
+        *[(x, y, base_height_mm) for x, y in outline],
     ]:
         position = lib3mf.Position()
         position.Coordinates[0] = float(vx)
@@ -1415,27 +1591,15 @@ def convert_qr_to_3mf(
         position.Coordinates[2] = float(vz)
         base_vertices.append(base_target_mesh.AddVertex(position))
 
-    # Create triangles for all 6 faces of the base box
-    base_triangle_indices = [
-        # Bottom face
-        (0, 2, 1),
-        (0, 3, 2),
-        # Top face
-        (4, 5, 6),
-        (4, 6, 7),
-        # Front face
-        (0, 1, 5),
-        (0, 5, 4),
-        # Back face
-        (3, 7, 6),
-        (3, 6, 2),
-        # Left face
-        (0, 4, 7),
-        (0, 7, 3),
-        # Right face
-        (1, 2, 6),
-        (1, 6, 5),
-    ]
+    # The outline runs counter-clockwise seen from above
+    bottom, top = 2, 2 + n
+    base_triangle_indices = []
+    for i in range(n):
+        j = (i + 1) % n
+        base_triangle_indices.append((0, bottom + j, bottom + i))  # Bottom cap, normal -Z
+        base_triangle_indices.append((1, top + i, top + j))  # Top cap, normal +Z
+        base_triangle_indices.append((bottom + i, bottom + j, top + j))  # Side wall, normal outward
+        base_triangle_indices.append((bottom + i, top + j, top + i))
 
     for v0, v1, v2 in base_triangle_indices:
         triangle = lib3mf.Triangle()
@@ -1453,27 +1617,17 @@ def convert_qr_to_3mf(
             prop.PropertyIDs[2] = base_material_id
             triangle_properties.append(prop)
 
-    # Add mounting features if requested
-    if mount_type == "keychain":
-        # Get dimensions
-        img_height, img_width = height_map.shape
-        base_width = img_width * pixel_size
-        base_depth = img_height * pixel_size
-
-        # Choose which mesh to add mount to
-        mount_target_mesh = base_mesh if separate_components else mesh_object
-
-        # Add keychain mount using similar logic as STL version
-        add_keychain_mount_3mf(
-            mount_target_mesh,
-            base_width,
-            base_depth,
-            base_height_mm,  # Use base height, not max height
-            hole_diameter,
+    # Add mounting features if requested, in the base color
+    mount_geometry = generate_mount_geometry(
+        mount_type, base_width, base_depth, hole_diameter, hole_band, arch_band, arch_height, arch_padding
+    )
+    if mount_geometry is not None:
+        add_mount_3mf(
+            base_mesh if separate_components else mesh_object,
+            mount_geometry,
             material_group if not separate_components else None,
             base_material_id if not separate_components else None,
             triangle_properties if not separate_components else None,
-            wrapper,
         )
 
     # Apply properties and add build items
@@ -1496,6 +1650,6 @@ def convert_qr_to_3mf(
     logger.info(f"Colors: base={base_color}, QR={qr_color}")
 
     if mount_type:
-        logger.info(f"Added {mount_type} mount with {hole_diameter:.1f}mm hole diameter")
+        logger.info(f"Added {mount_type} mount")
 
     return model_bytes

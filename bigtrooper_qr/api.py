@@ -79,6 +79,9 @@ class QRModelOptions(BaseModel):
     base_height: float = Field(default=50.0, ge=10.0, le=500.0, description="Base height in mm")
     base_thickness: float = Field(default=2.0, ge=0.5, le=20.0, description="Solid base plate thickness in mm")
     qr_depth: float = Field(default=1.0, ge=0.5, le=20.0, description="Height of QR modules above the base in mm")
+    corner_radius: float = Field(
+        default=0.0, ge=0.0, le=250.0, description="Radius of the base plate's rounded corners in mm (0 for square)"
+    )
     invert: bool = Field(default=False, description="Raise the white areas instead of the black modules")
     multi_layer: bool = Field(default=False, description="STL only: use distinct layer heights for base, QR and frame")
     layer_heights: list[PositiveFloat] | None = Field(
@@ -89,8 +92,22 @@ class QRModelOptions(BaseModel):
     )
 
     # Keychain tab
-    mount: Literal["keychain"] | None = Field(default=None, description="Add a rounded keychain tab at the top")
+    mount: Literal["keychain", "arch"] | None = Field(
+        default=None, description="Add a mount at the top: a small keychain tab, or a full-width arch"
+    )
     hole_diameter: float = Field(default=4.0, ge=1.0, le=10.0, description="Keychain hole diameter in mm")
+    hole_band: float = Field(
+        default=2.5, ge=1.0, le=6.0, description="Width of the plastic ring around the keychain hole in mm"
+    )
+
+    # Arch mount
+    arch_band: float = Field(default=4.0, ge=1.0, le=10.0, description="Width of the arch band in mm")
+    arch_height: float = Field(
+        default=12.0, ge=4.0, le=100.0, description="Total arch height above the plate edge in mm, padding included"
+    )
+    arch_padding: float = Field(
+        default=2.0, ge=0.5, le=20.0, description="Solid strip between the plate edge and the arch opening in mm"
+    )
 
     # Back text (STL only)
     back_text: str | None = Field(
@@ -207,6 +224,28 @@ def generate_qr_model(options: QRModelOptions | None = None, /, **kwargs: Any) -
         raise QRModelError("back_text is only supported for STL output; remove '3mf' from formats")
     if o.center_text and o.overlay_image:
         raise QRModelError("center_text and overlay_image cannot be used together")
+    if o.corner_radius > min(o.base_width, o.base_height) / 2:
+        raise QRModelError(
+            f"corner_radius {o.corner_radius}mm is too large; use at most half the shorter side "
+            f"({min(o.base_width, o.base_height) / 2}mm)"
+        )
+    tab_width = o.hole_diameter + 2 * o.hole_band
+    if o.mount == "keychain" and tab_width > o.base_width - 2 * o.corner_radius:
+        raise QRModelError(
+            f"The {tab_width}mm keychain tab doesn't fit on the straight top edge; "
+            f"use a corner_radius of at most {(o.base_width - tab_width) / 2}mm or a smaller hole"
+        )
+    if o.mount == "arch":
+        # The opening's edge is the arch offset inward by the band, which only stays a
+        # smooth curve while the band is thinner than the arch's tightest bend
+        curve_height = o.arch_height - o.arch_padding
+        half_width = o.base_width / 2
+        tightest = min(half_width**2 / curve_height, curve_height**2 / half_width) if curve_height > 0 else 0.0
+        if o.arch_band >= tightest:
+            raise QRModelError(
+                f"arch_band {o.arch_band}mm is too thick for a {o.arch_height}mm arch with {o.arch_padding}mm "
+                f"padding on a {o.base_width}mm plate; use a thinner band or a taller arch"
+            )
 
     format_kwargs: dict[str, Any] = _format_kwargs(o)
     try:
@@ -284,6 +323,11 @@ def generate_qr_model(options: QRModelOptions | None = None, /, **kwargs: Any) -
             has_frame=o.frame_style is not None,
             mount_type=o.mount,
             hole_diameter=o.hole_diameter,
+            hole_band=o.hole_band,
+            arch_band=o.arch_band,
+            arch_height=o.arch_height,
+            arch_padding=o.arch_padding,
+            corner_radius=o.corner_radius,
             back_text=o.back_text,
             back_text_size_mm=o.back_text_size,
             back_text_depth_mm=o.back_text_depth,
@@ -302,6 +346,11 @@ def generate_qr_model(options: QRModelOptions | None = None, /, **kwargs: Any) -
             separate_components=o.separate_components,
             mount_type=o.mount,
             hole_diameter=o.hole_diameter,
+            hole_band=o.hole_band,
+            arch_band=o.arch_band,
+            arch_height=o.arch_height,
+            arch_padding=o.arch_padding,
+            corner_radius=o.corner_radius,
         )
 
     for warning in result.warnings:

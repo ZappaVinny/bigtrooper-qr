@@ -18,6 +18,7 @@
   - [Output formats](#output-formats)
   - [3D dimensions](#3d-dimensions)
   - [Keychain tab](#keychain-tab)
+  - [Arch mount](#arch-mount)
   - [Back text](#back-text)
   - [Front label](#front-label)
   - [Center text and emoji](#center-text-and-emoji)
@@ -153,25 +154,47 @@ Only the requested outputs are generated, and the others are `None` on the resul
 | Option | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `base_width` | `float` | `50.0` | 10–500 mm | Width of the QR plate. |
-| `base_height` | `float` | `50.0` | 10–500 mm | Height of the QR plate. The keychain tab is added on top of this. |
+| `base_height` | `float` | `50.0` | 10–500 mm | Height of the QR plate. A mount (tab or arch) is added on top of this. |
 | `base_thickness` | `float` | `2.0` | 0.5–20 mm | Thickness of the solid plate under everything. |
 | `qr_depth` | `float` | `1.0` | 0.5–20 mm | How far the dark QR modules rise above the plate. |
+| `corner_radius` | `float` | `0.0` | 0 to half the shorter side | Rounds the plate's four corners, so the tag has no sharp points. `0` keeps square corners. |
 | `invert` | `bool` | `False` | | Raise the light areas instead, so the dark modules become recessed. |
 
 Total model thickness is `base_thickness + qr_depth`.
+
+**Rounded corners.** 3–4mm takes the sharp points off a collar tag. Rounding only cuts into the plate's corners, so the QR keeps its full size. Keep it small enough not to clip the QR's corner squares: the cut reaches about 0.29 × `corner_radius` in from each side, and a 28mm tag at `size=300` has about 2.7mm of margin, so stay under about 9mm. In 3MF the outline is a smooth curve. In STL it follows the pixel grid in steps of about 0.1mm, which is far below what a 0.4mm nozzle can print. With a keychain tab, the tab must still fit on the straight part of the top edge.
 
 ### Keychain tab
 
 | Option | Type | Default | Range / values | Description |
 |---|---|---|---|---|
-| `mount` | `"keychain"` or `None` | `None` | | Adds a rounded tab with a hole, centered on the top edge. |
+| `mount` | `"keychain"`, `"arch"` or `None` | `None` | | `"keychain"` adds a small rounded tab with a hole, centered on the top edge. `"arch"` adds a full-width arch (see [Arch mount](#arch-mount)). |
 | `hole_diameter` | `float` | `4.0` | 1–10 mm | Diameter of the hole. Use 3.5 for the small split rings on pet tags, or 4–5 for thicker rings. |
+| `hole_band` | `float` | `2.5` | 1–6 mm | Width of the plastic ring around the hole, including between the hole and the plate. |
 
 How the tab is shaped:
-- **Shape:** a "D". Straight sides rise from the QR plate and close in a half-circle centered on the hole, so the band of plastic around the hole is even.
-- **Size:** 15mm wide, about 10mm tall, and always **2mm thick** whatever `base_thickness` is.
-- **Strength:** there is always at least 1mm of plastic between the hole and the plate, and around the hole. Large holes make the tab grow; a 10mm hole gives a tab about 13.5mm tall.
-- **Footprint:** the tab adds about 10mm to the overall height. A 28mm tag comes out about 28 × 38mm.
+- **Shape:** a "D". Straight sides rise from the QR plate and close in a half-circle centered on the hole. The ring is `hole_band` wide all the way round, including toward the plate, so there's no thin neck.
+- **Size:** `hole_diameter + 2 × hole_band` wide and tall (8.5 × 8.5mm for a 3.5mm hole with the default band), and always **2mm thick** whatever `base_thickness` is.
+- **Strength:** 2.5mm of ring is about six nozzle widths, which holds up to a split ring. Go down to 2mm for a slimmer look, or up to 3mm for tags that take rough wear.
+- **Footprint:** the tab adds `hole_diameter + 2 × hole_band` to the overall height. A 28mm tag with a 3.5mm hole comes out about 28 × 36.5mm.
+
+### Arch mount
+
+`mount="arch"` replaces the small tab with an arch as wide as the plate, leaving a large opening for a split ring, collar clip or lanyard.
+
+| Option | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `arch_band` | `float` | `4.0` | 1–10 mm | Width of the arch band. It's the same width everywhere along the curve. |
+| `arch_height` | `float` | `12.0` | 4–100 mm | Total height of the mount above the plate edge, padding included. |
+| `arch_padding` | `float` | `2.0` | 0.5–20 mm | Solid strip between the plate edge and the opening. It ties the two legs together and stiffens the plate's top edge. |
+
+How the arch is shaped:
+- **Shape:** a half-ellipse as wide as the plate. Its outer edges continue the plate's sides straight up, so the outline has no corners where the arch meets the plate. The opening's edge is the outer curve moved inward by `arch_band`.
+- **Why a half-ellipse:** a ring pulls on the top of the arch. Vertical legs carry that pull straight down as tension instead of bending the arch, and the half-ellipse meets the sides vertically. A taller arch (bigger `arch_height`) makes the shape more upright and stronger.
+- **Opening:** `base_width − 2 × arch_band` wide and `arch_height − arch_padding − arch_band` tall. That's 20 × 6mm on a 28mm tag with the defaults.
+- **Size:** always **2mm thick**, like the keychain tab. A 28mm tag comes out about 28 × 40mm.
+- **Corners:** with `corner_radius`, only the plate's bottom corners are rounded. The top corners stay square because the arch's legs continue them.
+- **Limit:** `arch_band` must be thinner than the arch's tightest bend, or the opening's edge would fold over itself. Thin bands, tall arches and wide plates all have more room.
 
 ### Back text
 
@@ -312,6 +335,9 @@ Warnings are also sent to the `bigtrooper_qr` logger. The library adds a `NullHa
 - `back_text` can't fit on the plate even at the smallest size, or is empty or only whitespace
 - `data` is too long for a QR code at the chosen `error_correction` level
 - `overlay_image` bytes aren't a readable image
+- `corner_radius` is more than half the shorter side of the plate
+- the keychain tab (`hole_diameter + 2 × hole_band` wide) doesn't fit on the straight top edge left by `corner_radius`
+- `arch_band` is too thick for the arch's tightest bend (use a thinner band or a taller arch)
 
 Both `ValidationError` and `QRModelError` describe problems with the caller's input. In an API, return them as 4xx responses with the error message.
 
@@ -341,7 +367,7 @@ Learned from test prints with a 0.4mm nozzle.
 
 **Collar tag sizes**
 - 22–28mm suits typical pet tags, and 30–32mm is the large end.
-- Remember the keychain tab adds about 10mm to the height.
+- Remember the mount adds to the height: about 8.5mm for the keychain tab (3.5mm hole, default `hole_band`), or 12mm for the arch with its defaults.
 
 ## Using it behind an API
 

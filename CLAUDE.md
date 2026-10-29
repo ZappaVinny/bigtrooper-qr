@@ -28,7 +28,7 @@ The repo is a fork of paulrobello/par_qr_3d. It was deliberately stripped to onl
 - `bigtrooper_qr/api.py`: `QRModelOptions` (pydantic: every option, its range, color checks), `generate_qr_model()` (the pipeline), and `QRModelResult`
 - `bigtrooper_qr/errors.py`: `QRModelError(ValueError)`
 - `bigtrooper_qr/qr_generator.py`: 2D steps (QR types, styles, crop, label, center text, overlay, frames, PNG, SVG)
-- `bigtrooper_qr/stl_converter.py`: 3D steps (height-map STL mesh, recessed back text, rounded keychain tab, 3MF via lib3mf); returns bytes
+- `bigtrooper_qr/stl_converter.py`: 3D steps (height-map STL mesh, recessed back text, keychain tab and arch mounts, rounded plate corners, 3MF via lib3mf); returns bytes
 - `bigtrooper_qr/utils/`: color, font and image helpers
 - `bigtrooper_qr/fonts/`: Roboto-Black, DejaVuSans, NotoEmoji
 - `app/main.py`: a minimal FastAPI app with only `GET /`, which the Docker healthcheck also uses. Keep it simple.
@@ -40,8 +40,10 @@ The repo is a fork of paulrobello/par_qr_3d. It was deliberately stripped to onl
 ## Key Rules
 - **Nothing touches the filesystem;** outputs are bytes. `overlay_image` takes bytes, never a path, and isn't exposed by the API.
 - **Output is deterministic.** The STL header is written by hand, with no timestamp.
-- **No runtime mesh repair.** Faces must be generated with outward-facing winding. After any geometry change, check that the mesh's signed volume (the sum of v0·(v1×v2)/6 over all triangles) equals the volume implied by the height map plus the tab. The collar tag at `size=300` with back text "SCAN ME\nIN LIGHT" gives 308,700 faces and a volume of 1602.717 mm³. Then slice a generated STL.
-- **Preallocated face buffer:** new geometry must add its triangle count in `create_stl_from_heightmap`.
+- **No runtime mesh repair.** Faces must be generated with outward-facing winding. After any geometry change, check that the mesh's signed volume (the sum of v0·(v1×v2)/6 over all triangles) equals the volume implied by the height map plus the tab. The collar tag at `size=300` with back text "SCAN ME\nIN LIGHT" gives 308,700 faces and a volume of 1473.266 mm³ (default `hole_band` of 2.5, 3.5mm hole). Then slice a generated STL.
+- **Preallocated face buffer:** new geometry must add its triangle count in `create_stl_from_heightmap`. Mounts are counted automatically: each converter builds them once with `generate_mount_geometry` (an indexed `(vertices, triangles)` mesh) and passes that to both writers.
+- **Mounts must be closed:** every edge of a mount's indexed mesh is shared by exactly two triangles running opposite ways. Check this, and that its signed volume equals `MOUNT_THICKNESS_MM` × outline area, after changing mount geometry.
+- **Plate outline:** in STL, rounded corners come from a pixel `mask` (only True pixels are solid; outer walls follow its edge from each pixel's bottom to its top). In 3MF the base is the `rounded_rect_outline` extruded. With `corner_radius=0` the STL is face-for-face the same as before.
 - **Back text** is STL only and mirrored. It auto-shrinks with a warning, and must leave at least 0.4mm of material above it.
 - **Errors:** library code raises `QRModelError` for caller mistakes. It never prints or exits.
 - **Never log presigned URLs** (the query string is a credential); log only the host.

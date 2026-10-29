@@ -13,7 +13,7 @@ Generates 3D printable QR code tags for BigTrooper. The repo has two parts:
 ## Features
 - **QR types:** text, URL, email, phone, SMS, WiFi, contact card (vCard)
 - **Outputs:** binary STL, multi-color 3MF, PNG preview, SVG
-- **Tag features:** rounded keychain tab with a configurable hole, and multi-line text recessed into the back
+- **Tag features:** a rounded keychain tab with a configurable hole or a full-width arch, rounded plate corners, and multi-line text recessed into the back
 - **Styling:** front label, center text or emoji, logo overlay (library only), frames, module styles, multi-layer heights, colors
 - **In memory and repeatable:** no files are written, and the same options always give the same bytes. A 28mm collar tag takes about 0.1–0.4 seconds.
 
